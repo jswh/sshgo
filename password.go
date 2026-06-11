@@ -63,7 +63,7 @@ func LoadPasswordStore(masterPassword string) (*PasswordStore, error) {
 	if len(store.Passwords) > 0 {
 		for k, v := range store.Passwords {
 			if _, err := store.decryptValue(v); err != nil {
-				return nil, fmt.Errorf("主密码错误或数据损坏")
+				return nil, fmt.Errorf("invalid master password or corrupted data")
 			}
 			_ = k
 			break
@@ -119,7 +119,7 @@ func (s *PasswordStore) decryptValue(encoded string) (string, error) {
 
 	nonceSize := aesGCM.NonceSize()
 	if len(data) < nonceSize {
-		return "", fmt.Errorf("密文太短")
+		return "", fmt.Errorf("ciphertext too short")
 	}
 
 	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
@@ -143,7 +143,7 @@ func (s *PasswordStore) Set(host, password string) error {
 func (s *PasswordStore) Get(host string) (string, error) {
 	encrypted, ok := s.Passwords[host]
 	if !ok {
-		return "", fmt.Errorf("密码不存在")
+		return "", fmt.Errorf("password not found")
 	}
 	return s.decryptValue(encrypted)
 }

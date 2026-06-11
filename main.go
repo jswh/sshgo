@@ -24,24 +24,25 @@ func main() {
 	args := os.Args[1:]
 
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Println("用法: sshgo [主机名|user@host]")
+		fmt.Println("Usage: sshgo [host|user@host:port]")
 		fmt.Println()
-		fmt.Println("SSH 客户端工具，支持:")
-		fmt.Println("  - 读取 ~/.ssh/config 配置")
-		fmt.Println("  - SSH key 认证")
-		fmt.Println("  - 密码加密保存")
-		fmt.Println("  - 交互式主机选择")
+		fmt.Println("SSH client with features:")
+		fmt.Println("  - Read ~/.ssh/config")
+		fmt.Println("  - SSH key authentication")
+		fmt.Println("  - Encrypted password storage")
+		fmt.Println("  - Interactive host selection")
 		fmt.Println()
-		fmt.Println("示例:")
-		fmt.Println("  sshgo zg              # 使用 ssh config 中的 zg")
-		fmt.Println("  sshgo root@1.2.3.4    # 直接登录指定地址")
-		fmt.Println("  sshgo                 # 列出所有主机供选择")
+		fmt.Println("Examples:")
+		fmt.Println("  sshgo zg              # Login using ssh config")
+		fmt.Println("  sshgo root@1.2.3.4    # Direct login")
+		fmt.Println("  sshgo root@host:2222  # Login with port")
+		fmt.Println("  sshgo                 # Interactive selection")
 		os.Exit(0)
 	}
 
 	sshConfig, err := loadSSHConfig()
 	if err != nil {
-		fmt.Printf("无法读取 SSH 配置文件: %v\n", err)
+		fmt.Printf("Failed to read SSH config: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -51,14 +52,11 @@ func main() {
 
 	if len(args) > 0 {
 		hostName := args[0]
-		
-		// 解析 user@host:port 格式
+
 		user, hostname, port := parseUserHost(hostName)
-		
-		// 尝试在配置中查找
+
 		info, found := findHost(hosts, hostName)
 		if !found && hostname != "" {
-			// 不在配置中，创建一个临时的 hostInfo
 			info = hostInfo{
 				Name:   hostname,
 				Source: "direct",
@@ -66,45 +64,44 @@ func main() {
 			if user != "" {
 				info.Name = user + "@" + hostname
 			}
-			// 存储端口信息到额外字段
 			if port != "" {
 				info.Name = info.Name + ":" + port
 			}
 		} else if !found {
-			fmt.Printf("主机 %s 未在 SSH 配置中找到\n", hostName)
+			fmt.Printf("Host %s not found in SSH config\n", hostName)
 			os.Exit(1)
 		}
-		
+
 		connectToHost(info, sshConfig, passwords)
 		return
 	}
 
 	if len(hosts) == 0 {
-		fmt.Println("没有找到任何可用的 SSH 主机配置")
+		fmt.Println("No SSH hosts found")
 		os.Exit(1)
 	}
 
-	fmt.Println("=== SSH 主机列表 ===")
+	fmt.Println("=== SSH Hosts ===")
 	fmt.Println()
 
 	var items []string
 	for i, h := range hosts {
 		status := ""
 		if h.HasPassword {
-			status = " [已保存密码]"
+			status = " [saved]"
 		}
 		items = append(items, fmt.Sprintf("%2d. %-20s %-8s%s", i+1, h.Name, h.Source, status))
 	}
 
 	prompt := promptui.Select{
-		Label: "选择要登录的主机",
+		Label: "Select host to connect",
 		Items: items,
 		Size:  20,
 	}
 
 	idx, _, err := prompt.Run()
 	if err != nil {
-		fmt.Printf("选择失败: %v\n", err)
+		fmt.Printf("Selection failed: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -112,20 +109,18 @@ func main() {
 }
 
 func parseUserHost(s string) (user, host, port string) {
-	// 解析 user@host:port 格式
 	if idx := strings.Index(s, "@"); idx >= 0 {
 		user = s[:idx]
 		s = s[idx+1:]
 	}
-	
-	// 检查端口
+
 	if idx := strings.LastIndex(s, ":"); idx >= 0 {
 		host = s[:idx]
 		port = s[idx+1:]
 	} else {
 		host = s
 	}
-	
+
 	return user, host, port
 }
 
@@ -146,36 +141,36 @@ func loadSSHConfig() (*ssh_config.Config, error) {
 func initPasswordStore() (*PasswordStore, error) {
 	path := getPasswordStorePath()
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		fmt.Println("首次使用密码库，请设置主密码（用于加密保存的密码）")
+		fmt.Println("First time setup: Please set a master password for encryption")
 		prompt := promptui.Prompt{
-			Label: "设置主密码",
+			Label: "Set master password",
 			Mask:  '*',
 		}
 		masterPwd, err := prompt.Run()
 		if err != nil {
-			return nil, fmt.Errorf("主密码设置失败: %w", err)
+			return nil, fmt.Errorf("failed to set master password: %w", err)
 		}
 		prompt2 := promptui.Prompt{
-			Label: "确认主密码",
+			Label: "Confirm master password",
 			Mask:  '*',
 		}
 		confirmPwd, err := prompt2.Run()
 		if err != nil {
-			return nil, fmt.Errorf("主密码确认失败: %w", err)
+			return nil, fmt.Errorf("failed to confirm master password: %w", err)
 		}
 		if masterPwd != confirmPwd {
-			return nil, fmt.Errorf("两次输入的主密码不一致")
+			return nil, fmt.Errorf("passwords do not match")
 		}
 		return LoadPasswordStore(masterPwd)
 	}
 
 	prompt := promptui.Prompt{
-		Label: "输入主密码",
+		Label: "Enter master password",
 		Mask:  '*',
 	}
 	masterPwd, err := prompt.Run()
 	if err != nil {
-		return nil, fmt.Errorf("主密码输入失败: %w", err)
+		return nil, fmt.Errorf("failed to enter master password: %w", err)
 	}
 	return LoadPasswordStore(masterPwd)
 }
@@ -222,7 +217,6 @@ func connectToHost(info hostInfo, cfg *ssh_config.Config, passwords *PasswordSto
 		user, _ = cfg.Get(info.Name, "User")
 		identityFile, _ = cfg.Get(info.Name, "IdentityFile")
 	} else if info.Source == "direct" {
-		// 解析 user@host:port 格式
 		name := info.Name
 		if idx := strings.Index(name, "@"); idx >= 0 {
 			user = name[:idx]
@@ -250,7 +244,7 @@ func connectToHost(info hostInfo, cfg *ssh_config.Config, passwords *PasswordSto
 
 	authMethods, err := buildAuthMethods(hostname, user, identityFile, passwords)
 	if err != nil {
-		fmt.Printf("认证失败: %v\n", err)
+		fmt.Printf("Authentication failed: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -262,14 +256,14 @@ func connectToHost(info hostInfo, cfg *ssh_config.Config, passwords *PasswordSto
 
 	client, err := ssh.Dial("tcp", hostname+":"+port, clientConfig)
 	if err != nil {
-		fmt.Printf("连接失败: %v\n", err)
+		fmt.Printf("Connection failed: %v\n", err)
 		os.Exit(1)
 	}
 	defer client.Close()
 
 	session, err := client.NewSession()
 	if err != nil {
-		fmt.Printf("创建会话失败: %v\n", err)
+		fmt.Printf("Failed to create session: %v\n", err)
 		os.Exit(1)
 	}
 	defer session.Close()
@@ -290,7 +284,7 @@ func connectToHost(info hostInfo, cfg *ssh_config.Config, passwords *PasswordSto
 	}
 
 	if err := session.RequestPty("xterm-256color", height, width, modes); err != nil {
-		fmt.Printf("请求伪终端失败: %v\n", err)
+		fmt.Printf("Failed to request PTY: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -299,7 +293,7 @@ func connectToHost(info hostInfo, cfg *ssh_config.Config, passwords *PasswordSto
 	session.Stderr = os.Stderr
 
 	if err := session.Shell(); err != nil {
-		fmt.Printf("启动 shell 失败: %v\n", err)
+		fmt.Printf("Failed to start shell: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -311,26 +305,26 @@ func connectToHost(info hostInfo, cfg *ssh_config.Config, passwords *PasswordSto
 func buildAuthMethods(hostName, user, identityFile string, passwords *PasswordStore) ([]ssh.AuthMethod, error) {
 	var methods []ssh.AuthMethod
 
-	// 1. 尝试从 SSH agent 获取密钥
+	// 1. Try SSH agent
 	if sshAgentConn, err := net.Dial("unix", os.Getenv("SSH_AUTH_SOCK")); err == nil {
 		sshAgent := agent.NewClient(sshAgentConn)
 		if keys, err := sshAgent.List(); err == nil && len(keys) > 0 {
 			methods = append(methods, ssh.PublicKeysCallback(sshAgent.Signers))
-			fmt.Println("使用 SSH agent 中的密钥")
+			fmt.Println("Using SSH agent keys")
 		}
 		sshAgentConn.Close()
 	}
 
-	// 2. 尝试使用配置的 IdentityFile
+	// 2. Try configured IdentityFile
 	if identityFile != "" {
 		identityFile = expandPath(identityFile)
 		if signer, err := loadPrivateKey(identityFile); err == nil {
 			methods = append(methods, ssh.PublicKeys(signer))
-			fmt.Printf("使用密钥: %s\n", identityFile)
+			fmt.Printf("Using key: %s\n", identityFile)
 		}
 	}
 
-	// 3. 尝试默认密钥文件
+	// 3. Try default keys
 	if identityFile == "" {
 		homeDir, _ := os.UserHomeDir()
 		defaultKeys := []string{"id_rsa", "id_ed25519", "id_ecdsa"}
@@ -342,38 +336,38 @@ func buildAuthMethods(hostName, user, identityFile string, passwords *PasswordSt
 		}
 	}
 
-	// 4. 检查是否有保存的密码（按需加载）
+	// 4. Check saved passwords
 	savedPasswords := loadSavedPasswords()
 	if savedPasswords.Has(hostName) {
 		savedPwd, err := savedPasswords.Get(hostName)
 		if err == nil {
 			methods = append(methods, ssh.Password(savedPwd))
-			fmt.Println("使用已保存的密码")
+			fmt.Println("Using saved password")
 			return methods, nil
 		}
 	}
 
-	// 5. 如果已经有认证方法，直接返回
+	// 5. Return if we have auth methods
 	if len(methods) > 0 {
 		return methods, nil
 	}
 
-	// 6. 没有任何认证方式，提示输入密码
+	// 6. Prompt for password
 	prompt := promptui.Prompt{
-		Label: fmt.Sprintf("输入 %s@%s 的密码", user, hostName),
+		Label: fmt.Sprintf("Enter password for %s@%s", user, hostName),
 		Mask:  '*',
 	}
 
 	password, err := prompt.Run()
 	if err != nil {
-		return nil, fmt.Errorf("密码输入失败: %w", err)
+		return nil, fmt.Errorf("failed to enter password: %w", err)
 	}
 
 	methods = append(methods, ssh.Password(password))
 
-	// 询问是否保存密码
+	// Ask to save password
 	savePrompt := promptui.Prompt{
-		Label:     "是否保存此密码? (y/n)",
+		Label:     "Save password? (y/n)",
 		Default:   "n",
 		AllowEdit: true,
 	}
@@ -381,11 +375,11 @@ func buildAuthMethods(hostName, user, identityFile string, passwords *PasswordSt
 	if strings.ToLower(strings.TrimSpace(saveAnswer)) == "y" {
 		store, err := initPasswordStore()
 		if err != nil {
-			fmt.Printf("密码库初始化失败: %v\n", err)
+			fmt.Printf("Failed to initialize password store: %v\n", err)
 		} else if err := store.Set(hostName, password); err != nil {
-			fmt.Printf("保存密码失败: %v\n", err)
+			fmt.Printf("Failed to save password: %v\n", err)
 		} else {
-			fmt.Println("密码已保存")
+			fmt.Println("Password saved")
 		}
 	}
 
@@ -398,19 +392,19 @@ func loadPrivateKey(path string) (ssh.Signer, error) {
 		return nil, err
 	}
 
-	// 尝试无密码
+	// Try without passphrase
 	if signer, err := ssh.ParsePrivateKey(key); err == nil {
 		return signer, nil
 	}
 
-	// 尝试输入密码
+	// Try with passphrase
 	passphrasePrompt := promptui.Prompt{
-		Label: fmt.Sprintf("输入 %s 的密钥密码", path),
+		Label: fmt.Sprintf("Enter passphrase for %s", path),
 		Mask:  '*',
 	}
 	passphrase, _ := passphrasePrompt.Run()
 	if passphrase == "" {
-		return nil, fmt.Errorf("需要密码")
+		return nil, fmt.Errorf("passphrase required")
 	}
 
 	return ssh.ParsePrivateKeyWithPassphrase(key, []byte(passphrase))
@@ -422,7 +416,7 @@ func loadSavedPasswords() *PasswordStore {
 		return &PasswordStore{Passwords: make(map[string]string)}
 	}
 	prompt := promptui.Prompt{
-		Label: "输入主密码",
+		Label: "Enter master password",
 		Mask:  '*',
 	}
 	masterPwd, err := prompt.Run()
@@ -431,7 +425,7 @@ func loadSavedPasswords() *PasswordStore {
 	}
 	store, err := LoadPasswordStore(masterPwd)
 	if err != nil {
-		fmt.Printf("密码库加载失败: %v\n", err)
+		fmt.Printf("Failed to load password store: %v\n", err)
 		return &PasswordStore{Passwords: make(map[string]string)}
 	}
 	return store
