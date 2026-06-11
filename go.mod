@@ -1,6 +1,6 @@
 module sshgo
 
-go 1.25
+go 1.25.0
 
 require (
 	github.com/kevinburke/ssh_config v1.6.0
