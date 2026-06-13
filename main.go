@@ -24,19 +24,22 @@ func main() {
 	args := os.Args[1:]
 
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Println("Usage: sshgo [host|user@host:port]")
+		fmt.Println("Usage: sshgo [host|user@host:port] [command]")
 		fmt.Println()
 		fmt.Println("SSH client with features:")
 		fmt.Println("  - Read ~/.ssh/config")
 		fmt.Println("  - SSH key authentication")
 		fmt.Println("  - Encrypted password storage")
 		fmt.Println("  - Interactive host selection")
+		fmt.Println("  - Execute remote commands")
 		fmt.Println()
 		fmt.Println("Examples:")
-		fmt.Println("  sshgo zg              # Login using ssh config")
-		fmt.Println("  sshgo root@1.2.3.4    # Direct login")
-		fmt.Println("  sshgo root@host:2222  # Login with port")
-		fmt.Println("  sshgo                 # Interactive selection")
+		fmt.Println("  sshgo zg                        # Login using ssh config")
+		fmt.Println("  sshgo root@1.2.3.4              # Direct login")
+		fmt.Println("  sshgo root@host:2222            # Login with port")
+		fmt.Println("  sshgo zg \"ls -la\"               # Execute command on remote host")
+		fmt.Println("  sshgo root@1.2.3.4 \"uptime\"     # Execute command directly")
+		fmt.Println("  sshgo                           # Interactive selection")
 		os.Exit(0)
 	}
 
@@ -49,6 +52,11 @@ func main() {
 	passwords := &PasswordStore{Passwords: make(map[string]string)}
 
 	hosts := buildHostList(sshConfig, passwords)
+
+	var command string
+	if len(args) > 1 {
+		command = strings.Join(args[1:], " ")
+	}
 
 	if len(args) > 0 {
 		hostName := args[0]
@@ -72,7 +80,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		connectToHost(info, sshConfig, passwords)
+		connectToHost(info, sshConfig, passwords, command)
 		return
 	}
 
@@ -105,7 +113,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	connectToHost(hosts[idx], sshConfig, passwords)
+	connectToHost(hosts[idx], sshConfig, passwords, "")
 }
 
 func parseUserHost(s string) (user, host, port string) {
@@ -208,7 +216,7 @@ func findHost(hosts []hostInfo, name string) (hostInfo, bool) {
 	return hostInfo{}, false
 }
 
-func connectToHost(info hostInfo, cfg *ssh_config.Config, passwords *PasswordStore) {
+func connectToHost(info hostInfo, cfg *ssh_config.Config, passwords *PasswordStore, command string) {
 	var hostname, port, user, identityFile string
 
 	if info.Source == "config" {
@@ -268,37 +276,51 @@ func connectToHost(info hostInfo, cfg *ssh_config.Config, passwords *PasswordSto
 	}
 	defer session.Close()
 
-	modes := ssh.TerminalModes{
-		ssh.ECHO:          1,
-		ssh.TTY_OP_ISPEED: 14400,
-		ssh.TTY_OP_OSPEED: 14400,
-	}
+	if command == "" {
+		// Interactive shell - request PTY
+		modes := ssh.TerminalModes{
+			ssh.ECHO:          1,
+			ssh.TTY_OP_ISPEED: 14400,
+			ssh.TTY_OP_OSPEED: 14400,
+		}
 
-	fd := int(os.Stdin.Fd())
-	width, height, _ := term.GetSize(fd)
-	if width == 0 {
-		width = 80
-	}
-	if height == 0 {
-		height = 24
-	}
+		fd := int(os.Stdin.Fd())
+		width, height, _ := term.GetSize(fd)
+		if width == 0 {
+			width = 80
+		}
+		if height == 0 {
+			height = 24
+		}
 
-	if err := session.RequestPty("xterm-256color", height, width, modes); err != nil {
-		fmt.Printf("Failed to request PTY: %v\n", err)
-		os.Exit(1)
+		if err := session.RequestPty("xterm-256color", height, width, modes); err != nil {
+			fmt.Printf("Failed to request PTY: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	session.Stdin = os.Stdin
 	session.Stdout = os.Stdout
 	session.Stderr = os.Stderr
 
-	if err := session.Shell(); err != nil {
-		fmt.Printf("Failed to start shell: %v\n", err)
-		os.Exit(1)
-	}
+	if command != "" {
+		// Execute remote command
+		if err := session.Run(command); err != nil {
+			if exitErr, ok := err.(*ssh.ExitError); ok {
+				os.Exit(exitErr.ExitStatus())
+			}
+			os.Exit(1)
+		}
+	} else {
+		// Start interactive shell
+		if err := session.Shell(); err != nil {
+			fmt.Printf("Failed to start shell: %v\n", err)
+			os.Exit(1)
+		}
 
-	if err := session.Wait(); err != nil {
-		os.Exit(0)
+		if err := session.Wait(); err != nil {
+			os.Exit(0)
+		}
 	}
 }
 
