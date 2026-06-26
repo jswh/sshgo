@@ -25,6 +25,9 @@
 | 🔒 **密码加密存储** | 使用 AES-GCM 加密保存密码，主密码保护 |
 | 🚀 **直接登录** | 支持 `user@host:port` 格式直接连接 |
 | 📋 **交互式选择** | 无参数时列出所有主机供选择 |
+| 📦 **Exec（结构化执行）** | 远程命令执行，返回结构化 JSON 输出 |
+| 🔍 **Info** | 查看主机的连接详情 |
+| 🏷️ **主机元数据** | 管理别名、备注、标签、连接优先级 |
 
 ## 🚀 快速安装
 
@@ -68,10 +71,61 @@ sshgo root@1.2.3.4:2222
 sshgo
 ```
 
+### Exec: 远程命令执行（结构化输出）
+
+执行命令并返回结构化 JSON（含 stdout、stderr、exit_code）：
+
+```bash
+sshgo exec db-staging "SELECT count(*) FROM users"
+```
+
+原始输出透传：
+
+```bash
+sshgo exec --raw web-01 "tail -n 100 /var/log/nginx/access.log"
+```
+
+使用 sudo 提权：
+
+```bash
+sshgo exec --sudo db-staging "systemctl restart postgresql"
+```
+
+### Info: 查看连接详情
+
+```bash
+sshgo info db-staging
+sshgo info --json db-staging    # 机器可读 JSON 格式
+```
+
+### Config: 管理主机元数据
+
+```bash
+sshgo config set db-staging alias db-prod
+sshgo config set db-staging tags prod,db,postgres
+sshgo config set db-staging notes "生产 PostgreSQL 实例"
+sshgo config set db-staging priority agent,key,password
+```
+
+查看所有主机元数据：
+
+```bash
+sshgo config list
+```
+
+按标签搜索：
+
+```bash
+sshgo config find --tag prod
+```
+
 ### 查看帮助
 
 ```bash
 sshgo --help
+sshgo exec --help
+sshgo info --help
+sshgo config --help
 ```
 
 ## 🔐 认证方式
@@ -82,7 +136,7 @@ sshgo --help
 ┌─────────────────────────────────────────────────────────────┐
 │                      认证流程                               │
 ├─────────────────────────────────────────────────────────────┤
-│  1. SSH Agent        → 检查是否有可用的 SSH 密钥代理        │
+│  1. SSH Agent        → 从 SSH 代理获取密钥签名              │
 │  2. IdentityFile     → 使用 SSH 配置中指定的密钥文件        │
 │  3. 默认密钥         → 尝试 id_rsa, id_ed25519, id_ecdsa   │
 │  4. 已保存密码       → 使用加密存储的密码                   │
@@ -90,12 +144,28 @@ sshgo --help
 └─────────────────────────────────────────────────────────────┘
 ```
 
+### exec 认证（非交互式）
+
+exec 子命令自动尝试 Agent → IdentityFile → 默认密钥 → 已保存密码，不会交互式提示输入密码。
+
+### sudo 密码复用
+
+`exec --sudo` 会自动复用 SSH 登录密码作为 sudo 密码，无需额外输入。
+
 ## 🗂️ 项目结构
 
 ```
 sshgo/
-├── main.go          # 主程序入口
-├── password.go      # 密码加密存储模块
+├── main.go          # CLI 路由、遗留模式、认证、连接
+├── exec.go          # 结构化远程命令执行（exec 子命令）
+├── info.go          # 连接信息展示（info 子命令）
+├── config.go        # 主机元数据管理（config 子命令）
+├── types.go         # 共享类型：ExecResult, InfoResult, HostMeta, LocalConfig
+├── password.go      # AES-GCM 加密密码存储
+├── CONTEXT.md       # 领域术语表
+├── docs/
+│   └── adr/
+│       └── 0001-separate-metadata-from-passwords.md
 ├── go.mod           # Go 模块定义
 ├── go.sum           # 依赖校验
 ├── LICENSE          # MIT 许可证

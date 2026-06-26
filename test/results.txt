@@ -1,0 +1,79 @@
+sshgo E2E Test Results
+Date: Fri Jun 26 04:19:23 CST 2026
+================================
+PASS: 72
+FAIL: 0
+Total: 72
+
+Test Details:
+  PASS: legacy: exit code propagated
+  PASS: legacy: direct user@host:port
+  PASS: legacy: interactive shows host list
+  PASS: legacy: direct user@host:port with command
+  PASS: exec: JSON stdout field
+  PASS: exec: JSON contains exit_code
+  PASS: exec: JSON contains command
+  PASS: exec: non-zero exit code
+  PASS: exec: captures stderr
+  PASS: exec --raw: raw stdout passthrough
+  PASS: exec --raw: exit code propagated
+  PASS: exec --sudo: structured JSON output
+  PASS: exec --sudo: valid JSON
+  PASS: exec --sudo: ran as root (via NOPASSWD)
+  PASS: exec: piped command result
+  PASS: exec: large output (10k chars)
+  PASS: exec: contains duration field
+  PASS: exec: valid JSON structure
+  PASS: info: shows hostname
+  PASS: info: shows user
+  PASS: info: shows source
+  PASS: info: shows auth methods
+  PASS: info --json: hostname field
+  PASS: info --json: user field
+  PASS: info --json: source field
+  PASS: info --json: auth methods field
+  PASS: info: no password exposure
+  PASS: info: no key path exposure
+  PASS: info: direct host shows port
+  PASS: info: direct host shows source
+  PASS: info --json: valid JSON
+  PASS: config set: alias accepted
+  PASS: config set: tags accepted
+  PASS: config set: notes accepted
+  PASS: config set: priority accepted
+  PASS: config list: host listed
+  PASS: config list: shows alias
+  PASS: config list: shows tags
+  PASS: config list: shows notes
+  PASS: config get all: shows alias
+  PASS: config get all: shows tags
+  PASS: config get: alias
+  PASS: config get: tags
+  PASS: config get: notes
+  PASS: config get: priority
+  PASS: config find: tag search hit
+  PASS: config find: tag search miss
+  PASS: config unset: key value cleared
+  PASS: config unset: host entry removed
+  PASS: exec by alias: resolves target
+  PASS: info by alias: resolves to host
+  PASS: legacy by alias: works
+  PASS: info: includes meta block when alias set
+  PASS: exec: unreachable host error
+  PASS: info: unknown host shows as direct
+  PASS: config set: invalid key error
+  PASS: exec: missing args error
+  PASS: info: missing args error
+  PASS: exec: special characters preserved
+  PASS: exec: empty stdout
+  PASS: exec: command not found error
+  PASS: config: multiple hosts: host-a
+  PASS: config: multiple hosts: host-b
+  PASS: config: ~/.sshgo_config is valid JSON
+  PASS: exec --help: shows usage
+  PASS: info --help: shows usage
+  PASS: config --help: shows usage
+  PASS: main --help: shows subcommands
+  PASS: main --help: shows subcommands
+  PASS: main --help: shows subcommands
+  PASS: config find: tag=docker finds host

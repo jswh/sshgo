@@ -23,48 +23,62 @@ type hostInfo struct {
 func main() {
 	args := os.Args[1:]
 
+	if len(args) == 0 {
+		interactiveSelect()
+		return
+	}
+
+	// Check for help flags before subcommand dispatch
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Println("Usage: sshgo [host|user@host:port] [command]")
-		fmt.Println()
-		fmt.Println("SSH client with features:")
-		fmt.Println("  - Read ~/.ssh/config")
-		fmt.Println("  - SSH key authentication")
-		fmt.Println("  - Encrypted password storage")
-		fmt.Println("  - Interactive host selection")
-		fmt.Println("  - Execute remote commands")
-		fmt.Println()
-		fmt.Println("Examples:")
-		fmt.Println("  sshgo zg                        # Login using ssh config")
-		fmt.Println("  sshgo root@1.2.3.4              # Direct login")
-		fmt.Println("  sshgo root@host:2222            # Login with port")
-		fmt.Println("  sshgo zg \"ls -la\"               # Execute command on remote host")
-		fmt.Println("  sshgo root@1.2.3.4 \"uptime\"     # Execute command directly")
-		fmt.Println("  sshgo                           # Interactive selection")
+		printHelp()
 		os.Exit(0)
 	}
 
-	sshConfig, err := loadSSHConfig()
-	if err != nil {
-		fmt.Printf("Failed to read SSH config: %v\n", err)
-		os.Exit(1)
-	}
+	// Subcommand dispatch
+	switch args[0] {
+	case "exec":
+		handleExec(args[1:])
+	case "info":
+		handleInfo(args[1:])
+	case "config":
+		handleConfig(args[1:])
+	default:
+		// Legacy mode: sshgo <host> [command]
+		sshConfig, err := loadSSHConfig()
+		if err != nil {
+			fmt.Printf("Failed to read SSH config: %v\n", err)
+			os.Exit(1)
+		}
 
-	passwords := &PasswordStore{Passwords: make(map[string]string)}
+		passwords := &PasswordStore{Passwords: make(map[string]string)}
+		hosts := buildHostList(sshConfig, passwords)
 
-	hosts := buildHostList(sshConfig, passwords)
+		var command string
+		if len(args) > 1 {
+			command = strings.Join(args[1:], " ")
+		}
 
-	var command string
-	if len(args) > 1 {
-		command = strings.Join(args[1:], " ")
-	}
-
-	if len(args) > 0 {
 		hostName := args[0]
-
 		user, hostname, port := parseUserHost(hostName)
 
+		// 1. Try SSH config lookup
 		info, found := findHost(hosts, hostName)
-		if !found && hostname != "" {
+
+		if !found {
+			// 2. Try alias resolution
+			aliasInfo := resolveAlias(hostName)
+			if aliasInfo.Name != "" {
+				info = aliasInfo
+				found = true
+			}
+		}
+
+		if !found {
+			// 3. Fall through to direct connection
+			if hostname == "" {
+				fmt.Printf("Host %s not found in SSH config\n", hostName)
+				os.Exit(1)
+			}
 			info = hostInfo{
 				Name:   hostname,
 				Source: "direct",
@@ -75,14 +89,49 @@ func main() {
 			if port != "" {
 				info.Name = info.Name + ":" + port
 			}
-		} else if !found {
-			fmt.Printf("Host %s not found in SSH config\n", hostName)
-			os.Exit(1)
 		}
 
 		connectToHost(info, sshConfig, passwords, command)
-		return
 	}
+}
+
+func printHelp() {
+	fmt.Println("Usage: sshgo [command] [args]")
+	fmt.Println()
+	fmt.Println("SSH client with features:")
+	fmt.Println("  - Read ~/.ssh/config")
+	fmt.Println("  - SSH key authentication")
+	fmt.Println("  - Encrypted password storage")
+	fmt.Println("  - Interactive host selection")
+	fmt.Println("  - Execute remote commands")
+	fmt.Println()
+	fmt.Println("Subcommands:")
+	fmt.Println("  exec    Execute a remote command with structured output")
+	fmt.Println("  info    Show connection information for a host")
+	fmt.Println("  config  Manage local host metadata")
+	fmt.Println()
+	fmt.Println("Legacy usage:")
+	fmt.Println("  sshgo <host> [command]")
+	fmt.Println("  sshgo root@host:2222")
+	fmt.Println("  sshgo                        # Interactive selection")
+	fmt.Println()
+	fmt.Println("Examples:")
+	fmt.Println("  sshgo exec db-staging \"SELECT count(*) FROM users\"")
+	fmt.Println("  sshgo info --json db-staging")
+	fmt.Println("  sshgo config set db-staging tags prod,db")
+	fmt.Println("  sshgo zg                        # Login using ssh config")
+	fmt.Println("  sshgo zg \"ls -la\"               # Execute command on remote host")
+}
+
+func interactiveSelect() {
+	sshConfig, err := loadSSHConfig()
+	if err != nil {
+		fmt.Printf("Failed to read SSH config: %v\n", err)
+		os.Exit(1)
+	}
+
+	passwords := &PasswordStore{Passwords: make(map[string]string)}
+	hosts := buildHostList(sshConfig, passwords)
 
 	if len(hosts) == 0 {
 		fmt.Println("No SSH hosts found")
@@ -204,6 +253,20 @@ func buildHostList(cfg *ssh_config.Config, passwords *PasswordStore) []hostInfo 
 		}
 	}
 
+	// Check local config for additional hosts
+	lc, err := LoadLocalConfig()
+	if err == nil {
+		for name := range lc.Hosts {
+			if !seen[name] {
+				seen[name] = true
+				result = append(result, hostInfo{
+					Name:   name,
+					Source: "manual",
+				})
+			}
+		}
+	}
+
 	return result
 }
 
@@ -250,19 +313,39 @@ func connectToHost(info hostInfo, cfg *ssh_config.Config, passwords *PasswordSto
 		user = "root"
 	}
 
-	authMethods, err := buildAuthMethods(hostname, user, identityFile, passwords)
+	// 1. Agent: keep connection alive during auth
+	var agentConn net.Conn
+	var methods []ssh.AuthMethod
+	if conn, err := net.Dial("unix", os.Getenv("SSH_AUTH_SOCK")); err == nil {
+		agentConn = conn
+		sshAgent := agent.NewClient(conn)
+		if signers, err := sshAgent.Signers(); err == nil && len(signers) > 0 {
+			methods = append(methods, ssh.PublicKeys(signers...))
+			fmt.Fprintln(os.Stderr, "Using SSH agent keys")
+		}
+	}
+
+	// 2. Build non-agent auth methods
+	moreMethods, err := buildAuthMethods(hostname, user, identityFile, passwords)
 	if err != nil {
+		if agentConn != nil {
+			agentConn.Close()
+		}
 		fmt.Printf("Authentication failed: %v\n", err)
 		os.Exit(1)
 	}
+	methods = append(methods, moreMethods...)
 
 	clientConfig := &ssh.ClientConfig{
 		User:            user,
-		Auth:            authMethods,
+		Auth:            methods,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
 	client, err := ssh.Dial("tcp", hostname+":"+port, clientConfig)
+	if agentConn != nil {
+		agentConn.Close() // safe to close after auth completes
+	}
 	if err != nil {
 		fmt.Printf("Connection failed: %v\n", err)
 		os.Exit(1)
@@ -327,30 +410,19 @@ func connectToHost(info hostInfo, cfg *ssh_config.Config, passwords *PasswordSto
 func buildAuthMethods(hostName, user, identityFile string, passwords *PasswordStore) ([]ssh.AuthMethod, error) {
 	var methods []ssh.AuthMethod
 
-	// 1. Try SSH agent
-	if sshAgentConn, err := net.Dial("unix", os.Getenv("SSH_AUTH_SOCK")); err == nil {
-		sshAgent := agent.NewClient(sshAgentConn)
-		if keys, err := sshAgent.List(); err == nil && len(keys) > 0 {
-			methods = append(methods, ssh.PublicKeysCallback(sshAgent.Signers))
-			fmt.Println("Using SSH agent keys")
-		}
-		sshAgentConn.Close()
-	}
-
-	// 2. Try configured IdentityFile
+	// 1. Try configured IdentityFile
 	if identityFile != "" {
 		identityFile = expandPath(identityFile)
 		if signer, err := loadPrivateKey(identityFile); err == nil {
 			methods = append(methods, ssh.PublicKeys(signer))
-			fmt.Printf("Using key: %s\n", identityFile)
+			fmt.Fprintf(os.Stderr, "Using key: %s\n", identityFile)
 		}
 	}
 
 	// 3. Try default keys
 	if identityFile == "" {
 		homeDir, _ := os.UserHomeDir()
-		defaultKeys := []string{"id_rsa", "id_ed25519", "id_ecdsa"}
-		for _, keyName := range defaultKeys {
+		for _, keyName := range []string{"id_rsa", "id_ed25519", "id_ecdsa"} {
 			keyPath := filepath.Join(homeDir, ".ssh", keyName)
 			if signer, err := loadPrivateKey(keyPath); err == nil {
 				methods = append(methods, ssh.PublicKeys(signer))
@@ -364,7 +436,7 @@ func buildAuthMethods(hostName, user, identityFile string, passwords *PasswordSt
 		savedPwd, err := savedPasswords.Get(hostName)
 		if err == nil {
 			methods = append(methods, ssh.Password(savedPwd))
-			fmt.Println("Using saved password")
+			fmt.Fprintln(os.Stderr, "Using saved password")
 			return methods, nil
 		}
 	}
@@ -397,11 +469,11 @@ func buildAuthMethods(hostName, user, identityFile string, passwords *PasswordSt
 	if strings.ToLower(strings.TrimSpace(saveAnswer)) == "y" {
 		store, err := initPasswordStore()
 		if err != nil {
-			fmt.Printf("Failed to initialize password store: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Failed to initialize password store: %v\n", err)
 		} else if err := store.Set(hostName, password); err != nil {
-			fmt.Printf("Failed to save password: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Failed to save password: %v\n", err)
 		} else {
-			fmt.Println("Password saved")
+			fmt.Fprintln(os.Stderr, "Password saved")
 		}
 	}
 

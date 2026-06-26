@@ -25,6 +25,9 @@ A lightweight SSH client that reads system SSH config, supports key authenticati
 | 🔒 **Encrypted Storage** | AES-GCM encryption with master password protection |
 | 🚀 **Direct Login** | Supports `user@host:port` format for direct connections |
 | 📋 **Interactive Selection** | Lists all hosts for selection when run without arguments |
+| 📦 **Exec (Structured)** | Run remote commands with structured JSON output (`exec` subcommand) |
+| 🔍 **Info** | Inspect connection details for any host (`info` subcommand) |
+| 🏷️ **Host Metadata** | Manage aliases, notes, tags, and connection priority per host (`config` subcommand) |
 
 ## 🚀 Quick Install
 
@@ -68,10 +71,63 @@ sshgo root@1.2.3.4:2222
 sshgo
 ```
 
+### Exec: Structured Remote Command
+
+Run a command and get structured JSON output (exit code, stdout, stderr):
+
+```bash
+sshgo exec db-staging "SELECT count(*) FROM users"
+```
+
+Raw output (passthrough):
+
+```bash
+sshgo exec --raw web-01 "tail -n 100 /var/log/nginx/access.log"
+```
+
+With sudo (reuses SSH password):
+
+```bash
+sshgo exec --sudo db-staging "systemctl restart postgresql"
+```
+
+### Info: Inspect Connection Details
+
+```bash
+sshgo info db-staging
+sshgo info --json db-staging    # Machine-readable JSON
+```
+
+### Config: Manage Host Metadata
+
+Set metadata for a host (stored in `~/.sshgo_config`):
+
+```bash
+sshgo config set db-staging alias db-prod
+sshgo config set db-staging tags prod,db,postgres
+sshgo config set db-staging notes "Production PostgreSQL"
+sshgo config set db-staging priority agent,key,password
+```
+
+List all hosts with metadata:
+
+```bash
+sshgo config list
+```
+
+Find by tag:
+
+```bash
+sshgo config find --tag prod
+```
+
 ### Show Help
 
 ```bash
 sshgo --help
+sshgo exec --help
+sshgo info --help
+sshgo config --help
 ```
 
 ## 🔐 Authentication
@@ -82,20 +138,36 @@ The program tries authentication in this order:
 ┌─────────────────────────────────────────────────────────────┐
 │                    Authentication Flow                      │
 ├─────────────────────────────────────────────────────────────┤
-│  1. SSH Agent        → Checks for available SSH key agent   │
+│  1. SSH Agent        → Captures key signers from agent      │
 │  2. IdentityFile     → Uses key file specified in config    │
-│  3. Default Keys     → Tries id_rsa, id_ed2559, id_ecdsa   │
+│  3. Default Keys     → Tries id_rsa, id_ed25519, id_ecdsa  │
 │  4. Saved Password   → Uses encrypted stored password       │
 │  5. Password Prompt  → Manual input (optional save)         │
 └─────────────────────────────────────────────────────────────┘
 ```
 
+### exec Authentication (Non-Interactive)
+
+The `exec` subcommand automatically tries Agent → IdentityFile → Default Keys → Saved Passwords, without interactive password prompts. If none succeed, it returns a structured error.
+
+### Sudo Password Reuse
+
+`exec --sudo` reuses the SSH login password as the sudo password, avoiding a separate prompt. For key-authenticated connections, it relies on `NOPASSWD` sudo configuration on the target host.
+
 ## 🗂️ Project Structure
 
 ```
 sshgo/
-├── main.go          # Main entry point
-├── password.go      # Password encryption module
+├── main.go          # CLI routing, legacy mode, authentication, connection
+├── exec.go          # Structured remote command execution (exec subcommand)
+├── info.go          # Connection information display (info subcommand)
+├── config.go        # Local host metadata management (config subcommand)
+├── types.go         # Shared types: ExecResult, InfoResult, HostMeta, LocalConfig
+├── password.go      # AES-GCM encrypted password store
+├── CONTEXT.md       # Domain glossary
+├── docs/
+│   └── adr/
+│       └── 0001-separate-metadata-from-passwords.md
 ├── go.mod           # Go module definition
 ├── go.sum           # Dependency checksums
 ├── LICENSE          # MIT License
