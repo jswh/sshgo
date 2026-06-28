@@ -1,6 +1,6 @@
 # sshgo
 
-A lightweight SSH client that reads system SSH config, supports key authentication, encrypted password storage, structured remote command execution, connection inspection, and local host metadata management.
+A lightweight SSH client that imports system SSH config (via `config import`), supports key authentication, encrypted password storage, structured remote command execution, connection inspection, and local host metadata management.
 
 ## Language
 
@@ -17,14 +17,14 @@ A subcommand that displays connection details for a Host — Hostname, Port, Use
 _Avoid_: status, inspect, details
 
 **config** (subcommand):
-A subcommand to manage local Host metadata stored in `~/.sshgo_config`. Supports CRUD on per-host fields: Alias, Notes, Tags, Connection Priority.
+A subcommand to manage local Host metadata stored in `~/.sshgo_config`. Supports CRUD on per-host fields: Alias, Notes, Tags, Connection Priority, Hostname, Port, User, IdentityFile, ProxyJump. Also provides `config import` to import hosts from `~/.ssh/config`.
 _Avoid_: manage, settings, metadata
 
 **Source**:
-The origin of a Host definition. One of: `config` (from `~/.ssh/config`), `direct` (from CLI argument `user@host:port`), or `manual` (created via local metadata without a backing SSH config entry).
+The origin of a Host definition. One of: `imported` (imported from `~/.ssh/config` via `config import`), `direct` (from CLI argument `user@host:port`), or `manual` (created via local metadata without connection details).
 
 **Local Metadata**:
-Per-Host auxiliary information stored in `~/.sshgo_config`, independent of `~/.ssh/config` and the encrypted password store. Fields: Alias (quick-reference name), Notes (free text), Tags (categorical labels for filtering/grouping), Connection Priority (ordering of authentication methods).
+Per-Host information stored in `~/.sshgo_config`, independent of `~/.ssh/config` and the encrypted password store. Fields: Alias (quick-reference name), Notes (free text), Tags (categorical labels for filtering/grouping), Connection Priority (ordering of authentication methods), Hostname, Port, User, IdentityFile, ProxyJump (connection details imported from `~/.ssh/config` or set manually).
 
 **Alias**:
 A user-defined short name for a Host that can be used as a positional argument instead of the full SSH config Host name or direct address.

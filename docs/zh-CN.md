@@ -20,7 +20,7 @@
 
 | 功能 | 描述 |
 |------|------|
-| 📖 **读取 SSH 配置** | 自动读取 `~/.ssh/config` 中的所有主机配置 |
+| 📖 **导入 SSH 配置** | 通过 `config import` 一次性导入 `~/.ssh/config` 的主机 |
 | 🔑 **SSH Key 认证** | 支持 SSH Agent、配置的 IdentityFile 和默认密钥 |
 | 🔒 **密码加密存储** | 使用 AES-GCM 加密保存密码，主密码保护 |
 | 🚀 **直接登录** | 支持 `user@host:port` 格式直接连接 |
@@ -46,6 +46,17 @@ go install github.com/jswh/sshgo@latest
 ```
 
 ## 📖 使用方法
+
+### 首次使用
+
+首次使用前，先导入 SSH 配置：
+
+```bash
+sshgo config import
+```
+
+这会一次性读取 `~/.ssh/config` 中的所有主机，并存储到 `~/.sshgo_config`。
+更新 `~/.ssh/config` 后重新执行即可同步变更。
 
 ### 登录 SSH 配置中的主机
 
@@ -98,7 +109,15 @@ sshgo info db-staging
 sshgo info --json db-staging    # 机器可读 JSON 格式
 ```
 
-### Config: 管理主机元数据
+### Config: 管理主机与元数据
+
+从 `~/.ssh/config` 导入主机：
+
+```bash
+sshgo config import
+```
+
+设置主机元数据（存储在 `~/.sshgo_config`）：
 
 ```bash
 sshgo config set db-staging alias db-prod
@@ -107,7 +126,17 @@ sshgo config set db-staging notes "生产 PostgreSQL 实例"
 sshgo config set db-staging priority agent,key,password
 ```
 
-查看所有主机元数据：
+设置或覆盖连接详情：
+
+```bash
+sshgo config set my-vm hostname 192.168.1.100
+sshgo config set my-vm user admin
+sshgo config set my-vm port 2222
+sshgo config set my-vm identity-file ~/.ssh/my_key
+sshgo config set my-vm proxy-jump bastion.example.com
+```
+
+查看所有主机及其元数据：
 
 ```bash
 sshgo config list

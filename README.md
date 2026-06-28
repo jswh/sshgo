@@ -20,7 +20,7 @@ A lightweight SSH client that reads system SSH config, supports key authenticati
 
 | Feature | Description |
 |---------|-------------|
-| 📖 **Read SSH Config** | Automatically reads all host entries from `~/.ssh/config` |
+| 📖 **Import SSH Config** | One-time import from `~/.ssh/config` via `config import` |
 | 🔑 **SSH Key Auth** | Supports SSH Agent, configured IdentityFile, and default keys |
 | 🔒 **Encrypted Storage** | AES-GCM encryption with master password protection |
 | 🚀 **Direct Login** | Supports `user@host:port` format for direct connections |
@@ -46,6 +46,17 @@ go install github.com/jswh/sshgo@latest
 ```
 
 ## 📖 Usage
+
+### Getting Started
+
+Before using sshgo for the first time, import your SSH config:
+
+```bash
+sshgo config import
+```
+
+This reads `~/.ssh/config` once and stores all host entries in `~/.sshgo_config`.
+Re-run after updating `~/.ssh/config` to sync changes.
 
 ### Login to SSH Config Host
 
@@ -98,7 +109,13 @@ sshgo info db-staging
 sshgo info --json db-staging    # Machine-readable JSON
 ```
 
-### Config: Manage Host Metadata
+### Config: Manage Hosts & Metadata
+
+Import hosts from `~/.ssh/config`:
+
+```bash
+sshgo config import
+```
 
 Set metadata for a host (stored in `~/.sshgo_config`):
 
@@ -109,7 +126,17 @@ sshgo config set db-staging notes "Production PostgreSQL"
 sshgo config set db-staging priority agent,key,password
 ```
 
-List all hosts with metadata:
+Set or override connection details:
+
+```bash
+sshgo config set my-vm hostname 192.168.1.100
+sshgo config set my-vm user admin
+sshgo config set my-vm port 2222
+sshgo config set my-vm identity-file ~/.ssh/my_key
+sshgo config set my-vm proxy-jump bastion.example.com
+```
+
+View all hosts and their metadata:
 
 ```bash
 sshgo config list

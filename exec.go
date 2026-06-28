@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kevinburke/ssh_config"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
@@ -49,14 +48,8 @@ func handleExec(args []string) {
 	hostName := args[0]
 	command := strings.Join(args[1:], " ")
 
-	sshCfg, err := loadSSHConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to read SSH config: %v\n", err)
-		os.Exit(1)
-	}
-
 	passwords := &PasswordStore{Passwords: make(map[string]string)}
-	hosts := buildHostList(sshCfg, passwords)
+	hosts := buildHostList(passwords)
 
 	_, hostname, _ := parseUserHost(hostName)
 
@@ -73,7 +66,7 @@ func handleExec(args []string) {
 
 	if !found {
 		if hostname == "" {
-			fmt.Fprintf(os.Stderr, "Host %q not found\n", hostName)
+			fmt.Fprintf(os.Stderr, "Host %q not found. Run `sshgo config import` to import from ~/.ssh/config.\n", hostName)
 			os.Exit(1)
 		}
 		info = hostInfo{
@@ -83,7 +76,7 @@ func handleExec(args []string) {
 	}
 
 	start := time.Now()
-	result := executeRemote(info, sshCfg, command, flags)
+	result := executeRemote(info, command, flags)
 	result.Duration = time.Since(start).Round(time.Millisecond).String()
 
 	if flags.Raw {
@@ -105,8 +98,12 @@ func resolveAlias(name string) hostInfo {
 	for host, meta := range lc.Hosts {
 		if meta.Alias == name {
 			info := hostInfo{
-				Name:   host,
-				Source: "config",
+				Name:         host,
+				Source:       "imported",
+				Hostname:     meta.Hostname,
+				Port:         meta.Port,
+				User:         meta.User,
+				IdentityFile: meta.IdentityFile,
 			}
 			if strings.Contains(host, "@") || strings.Contains(host, ":") {
 				info.Source = "direct"
@@ -140,15 +137,14 @@ func parseExecFlags(args *[]string) execFlags {
 }
 
 // executeRemote dials the host, runs a command, and returns structured output.
-func executeRemote(info hostInfo, cfg *ssh_config.Config, command string, flags execFlags) ExecResult {
-	var hostname, port, user, identityFile string
+func executeRemote(info hostInfo, command string, flags execFlags) ExecResult {
+	hostname := info.Hostname
+	port := info.Port
+	user := info.User
+	identityFile := info.IdentityFile
 
-	if info.Source == "config" {
-		hostname, _ = cfg.Get(info.Name, "Hostname")
-		port, _ = cfg.Get(info.Name, "Port")
-		user, _ = cfg.Get(info.Name, "User")
-		identityFile, _ = cfg.Get(info.Name, "IdentityFile")
-	} else {
+	// For direct addresses, parse from the name string
+	if info.Source == "direct" {
 		name := info.Name
 		if idx := strings.Index(name, "@"); idx >= 0 {
 			user = name[:idx]

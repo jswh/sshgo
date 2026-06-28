@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/kevinburke/ssh_config"
 	"golang.org/x/crypto/ssh/agent"
 )
 
@@ -39,14 +38,8 @@ func handleInfo(args []string) {
 
 	hostName := filtered[0]
 
-	sshCfg, err := loadSSHConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to read SSH config: %v\n", err)
-		os.Exit(1)
-	}
-
 	passwords := &PasswordStore{Passwords: make(map[string]string)}
-	hosts := buildHostList(sshCfg, passwords)
+	hosts := buildHostList(passwords)
 
 	_, hostname, _ := parseUserHost(hostName)
 
@@ -58,7 +51,7 @@ func handleInfo(args []string) {
 		if aliasInfo.Name != "" {
 			info = aliasInfo
 			found = true
-			// Re-resolve from SSH config if source is config
+			// Re-resolve from hosts list for full details
 			info2, f2 := findHost(hosts, info.Name)
 			if f2 {
 				info = info2
@@ -68,7 +61,7 @@ func handleInfo(args []string) {
 
 	if !found {
 		if hostname == "" {
-			fmt.Fprintf(os.Stderr, "Host %q not found\n", hostName)
+			fmt.Fprintf(os.Stderr, "Host %q not found. Run `sshgo config import` to import from ~/.ssh/config.\n", hostName)
 			os.Exit(1)
 		}
 		info = hostInfo{
@@ -77,22 +70,26 @@ func handleInfo(args []string) {
 		}
 	}
 
-	result := buildInfoResult(info, sshCfg)
+	result := buildInfoResult(info)
 
-	// Load local metadata
+	// Load local metadata (user-defined fields only, not connection details)
 	lc, err := LoadLocalConfig()
 	if err == nil {
-		if meta, ok := lc.Hosts[result.Name]; ok {
-			result.Meta = &meta
-		} else {
+		var meta HostMeta
+		var ok bool
+		if meta, ok = lc.Hosts[result.Name]; !ok {
 			// Also check by alias
-			for _, meta := range lc.Hosts {
-				if meta.Alias == result.Name {
-					m := meta
-					result.Meta = &m
+			for _, m := range lc.Hosts {
+				if m.Alias == result.Name {
+					meta = m
+					ok = true
 					break
 				}
 			}
+		}
+		if ok {
+			userMeta := stripConnectionFields(meta)
+			result.Meta = &userMeta
 		}
 	}
 
@@ -103,16 +100,15 @@ func handleInfo(args []string) {
 	}
 }
 
-func buildInfoResult(info hostInfo, cfg *ssh_config.Config) InfoResult {
-	var hostname, port, user, identityFile string
+func buildInfoResult(info hostInfo) InfoResult {
+	hostname := info.Hostname
+	port := info.Port
+	user := info.User
+	identityFile := info.IdentityFile
 	source := info.Source
 
-	if source == "config" {
-		hostname, _ = cfg.Get(info.Name, "Hostname")
-		port, _ = cfg.Get(info.Name, "Port")
-		user, _ = cfg.Get(info.Name, "User")
-		identityFile, _ = cfg.Get(info.Name, "IdentityFile")
-	} else {
+	// For direct addresses, parse from the name string
+	if source == "direct" {
 		name := info.Name
 		if idx := strings.Index(name, "@"); idx >= 0 {
 			user = name[:idx]
@@ -217,5 +213,17 @@ func printInfoHuman(result InfoResult) {
 		if len(result.Meta.ConnectionPriority) > 0 {
 			fmt.Println("    Priority:", strings.Join(result.Meta.ConnectionPriority, ", "))
 		}
+	}
+}
+
+// stripConnectionFields returns a copy of HostMeta with only user-defined metadata fields.
+// Connection details (hostname, port, user, identity-file, proxy-jump) are excluded
+// since they are already shown as top-level fields in InfoResult.
+func stripConnectionFields(meta HostMeta) HostMeta {
+	return HostMeta{
+		Alias:              meta.Alias,
+		Notes:              meta.Notes,
+		Tags:               meta.Tags,
+		ConnectionPriority: meta.ConnectionPriority,
 	}
 }

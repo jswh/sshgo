@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/kevinburke/ssh_config"
 )
 
 const localConfigVersion = "1"
@@ -70,8 +72,18 @@ func (c *LocalConfig) Set(host, key, value string) error {
 		meta.Tags = splitAndTrim(value)
 	case "connection-priority", "priority":
 		meta.ConnectionPriority = splitAndTrim(value)
+	case "hostname":
+		meta.Hostname = value
+	case "port":
+		meta.Port = value
+	case "user":
+		meta.User = value
+	case "identity-file", "identityfile":
+		meta.IdentityFile = value
+	case "proxy-jump", "proxyjump":
+		meta.ProxyJump = value
 	default:
-		return fmt.Errorf("unknown key %q; supported: alias, notes, tags, connection-priority", key)
+		return fmt.Errorf("unknown key %q; supported: alias, notes, tags, connection-priority, hostname, port, user, identity-file, proxy-jump", key)
 	}
 
 	if c.Hosts == nil {
@@ -97,11 +109,21 @@ func (c *LocalConfig) Get(host, key string) (string, error) {
 		return strings.Join(meta.Tags, ", "), nil
 	case "connection-priority", "priority":
 		return strings.Join(meta.ConnectionPriority, ", "), nil
+	case "hostname":
+		return meta.Hostname, nil
+	case "port":
+		return meta.Port, nil
+	case "user":
+		return meta.User, nil
+	case "identity-file", "identityfile":
+		return meta.IdentityFile, nil
+	case "proxy-jump", "proxyjump":
+		return meta.ProxyJump, nil
 	case "":
 		// Print all
 		return c.formatMeta(meta), nil
 	default:
-		return "", fmt.Errorf("unknown key %q; supported: alias, notes, tags, connection-priority", key)
+		return "", fmt.Errorf("unknown key %q; supported: alias, notes, tags, connection-priority, hostname, port, user, identity-file, proxy-jump", key)
 	}
 }
 
@@ -126,6 +148,16 @@ func (c *LocalConfig) Unset(host, key string) error {
 		meta.Tags = nil
 	case "connection-priority", "priority":
 		meta.ConnectionPriority = nil
+	case "hostname":
+		meta.Hostname = ""
+	case "port":
+		meta.Port = ""
+	case "user":
+		meta.User = ""
+	case "identity-file", "identityfile":
+		meta.IdentityFile = ""
+	case "proxy-jump", "proxyjump":
+		meta.ProxyJump = ""
 	default:
 		return fmt.Errorf("unknown key %q", key)
 	}
@@ -173,6 +205,21 @@ func (c *LocalConfig) formatMeta(meta HostMeta) string {
 	if len(meta.ConnectionPriority) > 0 {
 		parts = append(parts, "priority: "+strings.Join(meta.ConnectionPriority, ", "))
 	}
+	if meta.Hostname != "" {
+		parts = append(parts, "hostname: "+meta.Hostname)
+	}
+	if meta.Port != "" {
+		parts = append(parts, "port: "+meta.Port)
+	}
+	if meta.User != "" {
+		parts = append(parts, "user: "+meta.User)
+	}
+	if meta.IdentityFile != "" {
+		parts = append(parts, "identity-file: "+meta.IdentityFile)
+	}
+	if meta.ProxyJump != "" {
+		parts = append(parts, "proxy-jump: "+meta.ProxyJump)
+	}
 	return strings.Join(parts, "\n")
 }
 
@@ -198,10 +245,13 @@ func handleConfig(args []string) {
 		fmt.Println()
 		fmt.Println("Commands:")
 		fmt.Println("  list                          List all hosts with metadata")
-		fmt.Println("  get <host> [key]              Get metadata (key: alias, notes, tags, priority)")
+		fmt.Println("  get <host> [key]              Get metadata")
 		fmt.Println("  set <host> <key> <value>      Set metadata")
 		fmt.Println("  unset <host> [key]            Remove metadata or entire host entry")
+		fmt.Println("  import                        Import hosts from ~/.ssh/config")
 		fmt.Println("  find --tag <tag>              Find hosts by tag")
+		fmt.Println()
+		fmt.Println("Metadata keys: alias, notes, tags, connection-priority, hostname, port, user, identity-file, proxy-jump")
 		return
 	}
 
@@ -286,8 +336,74 @@ func handleConfig(args []string) {
 			fmt.Println(name)
 		}
 
+	case "import":
+		handleConfigImport()
+
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown config command: %q\n", cmd)
 		os.Exit(1)
 	}
+}
+
+// handleConfigImport reads ~/.ssh/config and imports hosts into the local config.
+func handleConfigImport() {
+	sshCfg, err := loadSSHConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to read ~/.ssh/config: %v\n", err)
+		os.Exit(1)
+	}
+
+	lc, err := LoadLocalConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	count := 0
+	for _, host := range sshCfg.Hosts {
+		for _, pattern := range host.Patterns {
+			name := strings.TrimSpace(pattern.String())
+			if name == "" || name == "*" {
+				continue
+			}
+
+			// Preserve existing metadata (alias, notes, tags, priority)
+			meta := lc.Hosts[name]
+			meta.Hostname, _ = sshCfg.Get(name, "Hostname")
+			meta.Port, _ = sshCfg.Get(name, "Port")
+			meta.User, _ = sshCfg.Get(name, "User")
+			meta.IdentityFile, _ = sshCfg.Get(name, "IdentityFile")
+			meta.ProxyJump, _ = sshCfg.Get(name, "ProxyJump")
+
+			if lc.Hosts == nil {
+				lc.Hosts = make(map[string]HostMeta)
+			}
+			lc.Hosts[name] = meta
+			count++
+		}
+	}
+
+	if err := lc.Save(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Imported %d hosts from ~/.ssh/config\n", count)
+	fmt.Println("Run `sshgo config list` to see imported hosts.")
+	fmt.Println("Re-run `sshgo config import` after updating ~/.ssh/config.")
+}
+
+// loadSSHConfig reads and parses ~/.ssh/config.
+func loadSSHConfig() (*ssh_config.Config, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	configPath := filepath.Join(homeDir, ".ssh", "config")
+	f, err := os.Open(configPath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return ssh_config.Decode(f)
 }

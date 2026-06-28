@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/kevinburke/ssh_config"
 	"github.com/manifoldco/promptui"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
@@ -15,9 +14,13 @@ import (
 )
 
 type hostInfo struct {
-	Name        string
-	Source      string
-	HasPassword bool
+	Name         string
+	Source       string
+	HasPassword  bool
+	Hostname     string
+	Port         string
+	User         string
+	IdentityFile string
 }
 
 func main() {
@@ -44,14 +47,8 @@ func main() {
 		handleConfig(args[1:])
 	default:
 		// Legacy mode: sshgo <host> [command]
-		sshConfig, err := loadSSHConfig()
-		if err != nil {
-			fmt.Printf("Failed to read SSH config: %v\n", err)
-			os.Exit(1)
-		}
-
 		passwords := &PasswordStore{Passwords: make(map[string]string)}
-		hosts := buildHostList(sshConfig, passwords)
+		hosts := buildHostList(passwords)
 
 		var command string
 		if len(args) > 1 {
@@ -61,7 +58,7 @@ func main() {
 		hostName := args[0]
 		user, hostname, port := parseUserHost(hostName)
 
-		// 1. Try SSH config lookup
+		// 1. Try local config lookup
 		info, found := findHost(hosts, hostName)
 
 		if !found {
@@ -76,7 +73,7 @@ func main() {
 		if !found {
 			// 3. Fall through to direct connection
 			if hostname == "" {
-				fmt.Printf("Host %s not found in SSH config\n", hostName)
+				fmt.Printf("Host %s not found. Run `sshgo config import` to import from ~/.ssh/config.\n", hostName)
 				os.Exit(1)
 			}
 			info = hostInfo{
@@ -91,7 +88,7 @@ func main() {
 			}
 		}
 
-		connectToHost(info, sshConfig, passwords, command)
+		connectToHost(info, passwords, command)
 	}
 }
 
@@ -99,7 +96,7 @@ func printHelp() {
 	fmt.Println("Usage: sshgo [command] [args]")
 	fmt.Println()
 	fmt.Println("SSH client with features:")
-	fmt.Println("  - Read ~/.ssh/config")
+	fmt.Println("  - Import from ~/.ssh/config (via `config import`)")
 	fmt.Println("  - SSH key authentication")
 	fmt.Println("  - Encrypted password storage")
 	fmt.Println("  - Interactive host selection")
@@ -108,12 +105,15 @@ func printHelp() {
 	fmt.Println("Subcommands:")
 	fmt.Println("  exec    Execute a remote command with structured output")
 	fmt.Println("  info    Show connection information for a host")
-	fmt.Println("  config  Manage local host metadata")
+	fmt.Println("  config  Manage local host metadata and import SSH config")
 	fmt.Println()
 	fmt.Println("Legacy usage:")
 	fmt.Println("  sshgo <host> [command]")
 	fmt.Println("  sshgo root@host:2222")
 	fmt.Println("  sshgo                        # Interactive selection")
+	fmt.Println()
+	fmt.Println("First run:")
+	fmt.Println("  sshgo config import           # Import hosts from ~/.ssh/config")
 	fmt.Println()
 	fmt.Println("Examples:")
 	fmt.Println("  sshgo exec db-staging \"SELECT count(*) FROM users\"")
@@ -124,17 +124,11 @@ func printHelp() {
 }
 
 func interactiveSelect() {
-	sshConfig, err := loadSSHConfig()
-	if err != nil {
-		fmt.Printf("Failed to read SSH config: %v\n", err)
-		os.Exit(1)
-	}
-
 	passwords := &PasswordStore{Passwords: make(map[string]string)}
-	hosts := buildHostList(sshConfig, passwords)
+	hosts := buildHostList(passwords)
 
 	if len(hosts) == 0 {
-		fmt.Println("No SSH hosts found")
+		fmt.Println("No hosts found. Run `sshgo config import` to import from ~/.ssh/config.")
 		os.Exit(1)
 	}
 
@@ -162,7 +156,7 @@ func interactiveSelect() {
 		os.Exit(1)
 	}
 
-	connectToHost(hosts[idx], sshConfig, passwords, "")
+	connectToHost(hosts[idx], passwords, "")
 }
 
 func parseUserHost(s string) (user, host, port string) {
@@ -179,20 +173,6 @@ func parseUserHost(s string) (user, host, port string) {
 	}
 
 	return user, host, port
-}
-
-func loadSSHConfig() (*ssh_config.Config, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
-	}
-	configPath := filepath.Join(homeDir, ".ssh", "config")
-	f, err := os.Open(configPath)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return ssh_config.Decode(f)
 }
 
 func initPasswordStore() (*PasswordStore, error) {
@@ -232,39 +212,27 @@ func initPasswordStore() (*PasswordStore, error) {
 	return LoadPasswordStore(masterPwd)
 }
 
-func buildHostList(cfg *ssh_config.Config, passwords *PasswordStore) []hostInfo {
-	seen := make(map[string]bool)
+func buildHostList(passwords *PasswordStore) []hostInfo {
 	var result []hostInfo
 
-	for _, host := range cfg.Hosts {
-		for _, pattern := range host.Patterns {
-			name := strings.TrimSpace(pattern.String())
-			if name == "" || name == "*" {
-				continue
-			}
-			if seen[name] {
-				continue
-			}
-			seen[name] = true
-			result = append(result, hostInfo{
-				Name:   name,
-				Source: "config",
-			})
-		}
+	lc, err := LoadLocalConfig()
+	if err != nil {
+		return result
 	}
 
-	// Check local config for additional hosts
-	lc, err := LoadLocalConfig()
-	if err == nil {
-		for name := range lc.Hosts {
-			if !seen[name] {
-				seen[name] = true
-				result = append(result, hostInfo{
-					Name:   name,
-					Source: "manual",
-				})
-			}
+	for name, meta := range lc.Hosts {
+		source := "manual"
+		if meta.Hostname != "" || meta.User != "" || meta.Port != "" || meta.IdentityFile != "" {
+			source = "imported"
 		}
+		result = append(result, hostInfo{
+			Name:         name,
+			Source:       source,
+			Hostname:     meta.Hostname,
+			Port:         meta.Port,
+			User:         meta.User,
+			IdentityFile: meta.IdentityFile,
+		})
 	}
 
 	return result
@@ -279,15 +247,14 @@ func findHost(hosts []hostInfo, name string) (hostInfo, bool) {
 	return hostInfo{}, false
 }
 
-func connectToHost(info hostInfo, cfg *ssh_config.Config, passwords *PasswordStore, command string) {
-	var hostname, port, user, identityFile string
+func connectToHost(info hostInfo, passwords *PasswordStore, command string) {
+	hostname := info.Hostname
+	port := info.Port
+	user := info.User
+	identityFile := info.IdentityFile
 
-	if info.Source == "config" {
-		hostname, _ = cfg.Get(info.Name, "Hostname")
-		port, _ = cfg.Get(info.Name, "Port")
-		user, _ = cfg.Get(info.Name, "User")
-		identityFile, _ = cfg.Get(info.Name, "IdentityFile")
-	} else if info.Source == "direct" {
+	// For direct addresses, parse from the name string
+	if info.Source == "direct" {
 		name := info.Name
 		if idx := strings.Index(name, "@"); idx >= 0 {
 			user = name[:idx]
@@ -299,8 +266,6 @@ func connectToHost(info hostInfo, cfg *ssh_config.Config, passwords *PasswordSto
 		} else {
 			hostname = name
 		}
-	} else {
-		hostname = info.Name
 	}
 
 	if hostname == "" {

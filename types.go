@@ -32,6 +32,13 @@ type HostMeta struct {
 	Notes              string   `json:"notes,omitempty"`
 	Tags               []string `json:"tags,omitempty"`
 	ConnectionPriority []string `json:"connection_priority,omitempty"` // ordered auth method names
+
+	// SSH connection details (populated by `config import` or `config set`)
+	Hostname     string `json:"hostname,omitempty"`
+	Port         string `json:"port,omitempty"`
+	User         string `json:"user,omitempty"`
+	IdentityFile string `json:"identity_file,omitempty"`
+	ProxyJump    string `json:"proxy_jump,omitempty"`
 }
 
 // LocalConfig represents the full ~/.sshgo_config file.

@@ -17,8 +17,8 @@ FAIL=0
 TESTS=()
 
 # Test helpers
-pass() { ((PASS++)) && echo -e "  ${GREEN}✓ PASS${NC}: $1" && TESTS+=("PASS: $1"); }
-fail() { ((FAIL++)) && echo -e "  ${RED}✗ FAIL${NC}: $1" && TESTS+=("FAIL: $1"); }
+pass() { ((PASS++)) || true; echo -e "  ${GREEN}✓ PASS${NC}: $1"; TESTS+=("PASS: $1"); }
+fail() { ((FAIL++)) || true; echo -e "  ${RED}✗ FAIL${NC}: $1"; TESTS+=("FAIL: $1"); }
 assert_eq() {
     local desc="$1" expected="$2" actual="$3"
     if [[ "$expected" == "$actual" ]]; then
@@ -143,6 +143,10 @@ Host ${TEST_HOST}-root
   UserKnownHostsFile /dev/null
 CONFEOF
 
+# Import hosts from SSH config into local config (import-based architecture)
+echo "  Importing hosts into local config..."
+$SSHGO config import 2>&1 | sed 's/^/  /'
+
 echo -e "  ${GREEN}✓ Docker test environment ready${NC}"
 echo ""
 
@@ -239,14 +243,14 @@ echo "  --- Info Subcommand ---"
 OUTPUT=$($SSHGO info $TEST_HOST 2>/dev/null || true)
 assert_contains "info: shows hostname" "127.0.0.1" "$OUTPUT"
 assert_contains "info: shows user" "testuser" "$OUTPUT"
-assert_contains "info: shows source" "config" "$OUTPUT"
+assert_contains "info: shows source" "imported" "$OUTPUT"
 assert_contains "info: shows auth methods" "Auth" "$OUTPUT"
 
 # 2c-2: Info JSON output
 OUTPUT=$($SSHGO info --json $TEST_HOST 2>/dev/null || true)
 assert_contains "info --json: hostname field" "127.0.0.1" "$OUTPUT"
 assert_contains "info --json: user field" '"user": "testuser"' "$OUTPUT"
-assert_contains "info --json: source field" '"source": "config"' "$OUTPUT"
+assert_contains "info --json: source field" '"source": "imported"' "$OUTPUT"
 assert_contains "info --json: auth methods field" "auth_methods" "$OUTPUT"
 
 # 2c-3: Info does NOT expose credentials (auth method names are OK, key paths are not)
@@ -335,8 +339,12 @@ assert_not_contains "config unset: host entry removed" "$TEST_HOST" "$OUTPUT"
 # ------------------------------------------------------------------
 echo "  --- Alias Resolution ---"
 
-# Re-add host with alias for alias resolution testing
+# Re-add host with alias and connection details for alias resolution testing
 $SSHGO config set $TEST_HOST alias myalias 2>&1
+$SSHGO config set $TEST_HOST hostname 127.0.0.1 2>&1
+$SSHGO config set $TEST_HOST port 2222 2>&1
+$SSHGO config set $TEST_HOST user testuser 2>&1
+$SSHGO config set $TEST_HOST identity-file /tmp/sshgo_test_ed25519 2>&1
 
 # 2e-1: Exec using alias
 OUTPUT=$($SSHGO exec myalias "echo alias_works" 2>/dev/null || true)
