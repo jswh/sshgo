@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/kevinburke/ssh_config"
+	"github.com/manifoldco/promptui"
 )
 
 const localConfigVersion = "1"
@@ -249,6 +250,7 @@ func handleConfig(args []string) {
 		fmt.Println("  set <host> <key> <value>      Set metadata")
 		fmt.Println("  unset <host> [key]            Remove metadata or entire host entry")
 		fmt.Println("  import                        Import hosts from ~/.ssh/config")
+		fmt.Println("  set-sudo-password <host>      Set sudo password for a host")
 		fmt.Println("  find --tag <tag>              Find hosts by tag")
 		fmt.Println()
 		fmt.Println("Metadata keys: alias, notes, tags, connection-priority, hostname, port, user, identity-file, proxy-jump")
@@ -339,6 +341,9 @@ func handleConfig(args []string) {
 	case "import":
 		handleConfigImport()
 
+	case "set-sudo-password":
+		handleSetSudoPassword(args[1:])
+
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown config command: %q\n", cmd)
 		os.Exit(1)
@@ -406,4 +411,49 @@ func loadSSHConfig() (*ssh_config.Config, error) {
 	}
 	defer f.Close()
 	return ssh_config.Decode(f)
+}
+
+// handleSetSudoPassword prompts for a sudo password and saves it to the encrypted store.
+func handleSetSudoPassword(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "Usage: sshgo config set-sudo-password <host>")
+		os.Exit(1)
+	}
+	host := args[0]
+
+	prompt := promptui.Prompt{
+		Label: fmt.Sprintf("Enter sudo password for %s", host),
+		Mask:  '*',
+	}
+	pwd, err := prompt.Run()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to read password: %v\n", err)
+		os.Exit(1)
+	}
+
+	prompt2 := promptui.Prompt{
+		Label: "Confirm sudo password",
+		Mask:  '*',
+	}
+	confirm, err := prompt2.Run()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to read password: %v\n", err)
+		os.Exit(1)
+	}
+
+	if pwd != confirm {
+		fmt.Fprintln(os.Stderr, "Passwords do not match")
+		os.Exit(1)
+	}
+
+	store, err := initPasswordStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to init password store: %v\n", err)
+		os.Exit(1)
+	}
+	if err := store.SetSudoPassword(host, pwd); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to save sudo password: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("sudo password for %s saved\n", host)
 }

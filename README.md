@@ -148,6 +148,12 @@ Find by tag:
 sshgo config find --tag prod
 ```
 
+Configure a sudo password (stored encrypted in `~/.sshgo_passwords`):
+
+```bash
+sshgo config set-sudo-password db-staging
+```
+
 ### Show Help
 
 ```bash
@@ -177,9 +183,23 @@ The program tries authentication in this order:
 
 The `exec` subcommand automatically tries Agent → IdentityFile → Default Keys → Saved Passwords, without interactive password prompts. If none succeed, it returns a structured error.
 
-### Sudo Password Reuse
+### Sudo Password
 
-`exec --sudo` reuses the SSH login password as the sudo password, avoiding a separate prompt. For key-authenticated connections, it relies on `NOPASSWD` sudo configuration on the target host.
+`exec --sudo` uses the following priority to determine the sudo password:
+
+1. **Saved sudo password** (set via `sshgo config set-sudo-password <host>`)
+2. **Saved SSH password** (reuses the SSH login password)
+3. **Interactive prompt** (for key-authenticated connections without NOPASSWD)
+4. **NOPASSWD** (relies on target host's sudo configuration)
+
+To pre-configure a sudo password:
+
+```bash
+sshgo config set-sudo-password db-staging
+```
+
+When using key authentication and no NOPASSWD is configured, `exec --sudo` will
+prompt for a sudo password with an option to save it.
 
 ## 🗂️ Project Structure
 

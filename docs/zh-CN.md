@@ -148,6 +148,12 @@ sshgo config list
 sshgo config find --tag prod
 ```
 
+配置 sudo 密码（加密存储在 `~/.sshgo_passwords`）：
+
+```bash
+sshgo config set-sudo-password db-staging
+```
+
 ### 查看帮助
 
 ```bash
@@ -177,9 +183,22 @@ sshgo config --help
 
 exec 子命令自动尝试 Agent → IdentityFile → 默认密钥 → 已保存密码，不会交互式提示输入密码。
 
-### sudo 密码复用
+### sudo 密码
 
-`exec --sudo` 会自动复用 SSH 登录密码作为 sudo 密码，无需额外输入。
+`exec --sudo` 按以下优先级确定 sudo 密码：
+
+1. **已保存的 sudo 密码**（通过 `sshgo config set-sudo-password <host>` 设置）
+2. **已保存的 SSH 密码**（复用 SSH 登录密码）
+3. **交互式提示**（密钥登录且没有 NOPASSWD 时）
+4. **NOPASSWD**（依赖远程主机的 sudo 配置）
+
+预先配置 sudo 密码：
+
+```bash
+sshgo config set-sudo-password db-staging
+```
+
+使用密钥登录且远程没有 NOPASSWD 时，`exec --sudo` 会提示输入 sudo 密码并可选保存。
 
 ## 🗂️ 项目结构
 

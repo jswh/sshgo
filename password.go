@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 )
 
+const sudoKeySuffix = "/sudo"
+
 type PasswordStore struct {
 	Passwords map[string]string `json:"passwords"`
 	Salt      string            `json:"salt"`
@@ -151,4 +153,23 @@ func (s *PasswordStore) Get(host string) (string, error) {
 func (s *PasswordStore) Has(host string) bool {
 	_, ok := s.Passwords[host]
 	return ok
+}
+
+func (s *PasswordStore) sudoKey(host string) string {
+	return host + sudoKeySuffix
+}
+
+// SetSudoPassword stores a sudo password for the given host.
+func (s *PasswordStore) SetSudoPassword(host, password string) error {
+	return s.Set(s.sudoKey(host), password)
+}
+
+// GetSudoPassword retrieves the saved sudo password for the given host.
+func (s *PasswordStore) GetSudoPassword(host string) (string, error) {
+	return s.Get(s.sudoKey(host))
+}
+
+// HasSudoPassword checks if a sudo password is saved for the given host.
+func (s *PasswordStore) HasSudoPassword(host string) bool {
+	return s.Has(s.sudoKey(host))
 }

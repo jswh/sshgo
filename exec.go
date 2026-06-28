@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"net"
@@ -11,6 +12,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+	"golang.org/x/term"
 )
 
 // execFlags holds parsed flags for the exec subcommand.
@@ -257,11 +259,9 @@ func executeRemote(info hostInfo, command string, flags execFlags) ExecResult {
 }
 
 // buildAuthMethodsNonInteractive adds non-agent auth methods to the given slice.
-// Tries keys and saved passwords. For --sudo, prompts for master password to decrypt saved passwords.
 // Returns the sudo password if available.
+// Priority for sudo password: saved sudo password > saved SSH password > interactive prompt.
 func buildAuthMethodsNonInteractive(hostName, user, identityFile string, needSudo bool, methods *[]ssh.AuthMethod) string {
-	var savedPassword string
-
 	// Try configured IdentityFile (skip passphrase-protected keys non-interactively)
 	if identityFile != "" {
 		identityFile = expandPath(identityFile)
@@ -283,19 +283,89 @@ func buildAuthMethodsNonInteractive(hostName, user, identityFile string, needSud
 		}
 	}
 
-	// If sudo is needed or no agent/keys, try saved passwords (may prompt for master password)
-	if needSudo || len(*methods) == 0 {
+	hasKeyAuth := len(*methods) > 0
+
+	// If sudo is needed or no key auth, try saved passwords (may prompt for master password)
+	if needSudo || !hasKeyAuth {
 		store := tryLoadPasswordStoreInteractive()
-		if store != nil && store.Has(hostName) {
-			if pwd, err := store.Get(hostName); err == nil {
-				*methods = append(*methods, ssh.Password(pwd))
-				savedPassword = pwd
-				fmt.Fprintln(os.Stderr, "exec: using saved password")
+		if store != nil {
+			// First try saved sudo password
+			if needSudo && store.HasSudoPassword(hostName) {
+				if pwd, err := store.GetSudoPassword(hostName); err == nil {
+					if !hasKeyAuth {
+						*methods = append(*methods, ssh.Password(pwd))
+					}
+					fmt.Fprintln(os.Stderr, "exec: using saved sudo password")
+					return pwd
+				}
+			}
+			// Then try saved SSH password
+			if store.Has(hostName) {
+				if pwd, err := store.Get(hostName); err == nil {
+					if !hasKeyAuth {
+						*methods = append(*methods, ssh.Password(pwd))
+					}
+					fmt.Fprintln(os.Stderr, "exec: using saved password")
+					return pwd
+				}
 			}
 		}
 	}
 
-	return savedPassword
+	// Key auth + sudo + no saved passwords → prompt for sudo password
+	if needSudo && hasKeyAuth {
+		if pwd := promptSudoPassword(hostName, user); pwd != "" {
+			return pwd
+		}
+	}
+
+	return ""
+}
+
+// promptSudoPassword interactively prompts for a sudo password with option to save.
+// Uses stderr for prompts and term.ReadPassword to avoid corrupting stdout.
+// In non-interactive terminals, returns "" without prompting (relies on NOPASSWD).
+func promptSudoPassword(hostName, user string) string {
+	if !isInteractive() {
+		return ""
+	}
+	fmt.Fprintf(os.Stderr, "sudo password for %s@%s (empty = NOPASSWD): ", user, hostName)
+	pwdBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return ""
+	}
+	pwd := string(pwdBytes)
+	if pwd == "" {
+		return ""
+	}
+
+	// Ask to save
+	fmt.Fprintf(os.Stderr, "Save sudo password? (y/n): ")
+	reader := bufio.NewReader(os.Stdin)
+	answer, _ := reader.ReadString('\n')
+	answer = strings.TrimSpace(answer)
+	if strings.ToLower(answer) == "y" {
+		store, err := initPasswordStore()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to init password store: %v\n", err)
+		} else if err := store.SetSudoPassword(hostName, pwd); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to save sudo password: %v\n", err)
+		} else {
+			fmt.Fprintln(os.Stderr, "sudo password saved")
+		}
+	}
+
+	return pwd
+}
+
+// isInteractive checks whether stdin is a terminal (character device).
+func isInteractive() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
 }
 
 // tryLoadKey tries to load a private key without passphrase prompts. Returns nil on failure.
