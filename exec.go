@@ -324,9 +324,10 @@ func buildAuthMethodsNonInteractive(hostName, user, identityFile string, needSud
 
 // promptSudoPassword interactively prompts for a sudo password with option to save.
 // Uses stderr for prompts and term.ReadPassword to avoid corrupting stdout.
-// In non-interactive terminals, returns "" without prompting (relies on NOPASSWD).
+// In non-interactive terminals, prints a hint and returns "".
 func promptSudoPassword(hostName, user string) string {
 	if !isInteractive() {
+		fmt.Fprintf(os.Stderr, "sudo password required for %s@%s. Use `sshgo config set-sudo-password %s` to set one.\n", user, hostName, hostName)
 		return ""
 	}
 	fmt.Fprintf(os.Stderr, "sudo password for %s@%s (empty = NOPASSWD): ", user, hostName)
@@ -359,13 +360,13 @@ func promptSudoPassword(hostName, user string) string {
 	return pwd
 }
 
-// isInteractive checks whether stdin is a terminal (character device).
+// isInteractive checks whether stdout is a terminal (TTY).
+// Uses stdout instead of stdin so that subshells (e.g. test scripts with $())
+// are correctly detected as non-interactive, avoiding hangs on prompts.
+// Uses term.IsTerminal instead of ModeCharDevice because /dev/null is also
+// a character device on some systems but is not a TTY.
 func isInteractive() bool {
-	fi, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return (fi.Mode() & os.ModeCharDevice) != 0
+	return term.IsTerminal(int(os.Stdout.Fd()))
 }
 
 // tryLoadKey tries to load a private key without passphrase prompts. Returns nil on failure.

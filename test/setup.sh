@@ -393,7 +393,7 @@ assert_contains "info: missing args error" "Usage: sshgo info" "$OUTPUT"
 echo "  --- Edge Cases ---"
 
 # 2g-1: Exec command with special characters
-OUTPUT=$($SSHGO exec $TEST_HOST "echo 'special chars: !@#\$'" 2>/dev/null || true)
+OUTPUT=$($SSHGO exec $TEST_HOST "echo 'special chars: !@#$'" 2>/dev/null || true)
 assert_contains "exec: special characters preserved" "special chars:" "$OUTPUT"
 
 # 2g-2: Exec with empty stdout (true command)
@@ -436,6 +436,23 @@ assert_contains "main --help: shows subcommands" "config" "$OUTPUT"
 $SSHGO config set $TEST_HOST tags e2e,test,docker 2>&1
 OUTPUT=$($SSHGO config find --tag docker 2>&1 || true)
 assert_contains "config find: tag=docker finds host" "$TEST_HOST" "$OUTPUT"
+
+# ------------------------------------------------------------------
+# 2h: Sudo password tests
+# ------------------------------------------------------------------
+echo "  --- Sudo Password ---"
+
+# 2h-1: Config help shows set-sudo-password command
+OUTPUT=$($SSHGO config --help 2>&1 || true)
+assert_contains "config help: shows set-sudo-password" "set-sudo-password" "$OUTPUT"
+
+# 2h-2: Exec --sudo with non-NOPASSWD command fails (no TTY for sudo password)
+OUTPUT=$($SSHGO exec --sudo $TEST_HOST "/bin/hostname" 2>/dev/null || true)
+assert_not_contains "exec --sudo: non-NOPASSWD command requires password" '"exit_code": 0' "$OUTPUT"
+
+# 2h-3: Stderr hint about set-sudo-password when no sudo password saved
+STDERR=$($SSHGO exec --sudo $TEST_HOST "/bin/hostname" 2>&1 1>/dev/null || true)
+assert_contains "exec --sudo: stderr hint about set-sudo-password" "set-sudo-password" "$STDERR"
 
 enable_strict
 
