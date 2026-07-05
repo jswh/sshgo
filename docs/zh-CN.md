@@ -8,6 +8,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.20+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![Release](https://img.shields.io/github/v/release/jswh/sshgo?logo=github)](https://github.com/jswh/sshgo/releases/latest)
 [![GitHub Stars](https://img.shields.io/github/stars/jswh/sshgo?style=social)](https://github.com/jswh/sshgo/stargazers)
 
 [English](../README.md) | **简体中文**
@@ -28,8 +29,24 @@
 | 📦 **Exec（结构化执行）** | 远程命令执行，返回结构化 JSON 输出 |
 | 🔍 **Info** | 查看主机的连接详情 |
 | 🏷️ **主机元数据** | 管理别名、备注、标签、连接优先级 |
+| 🔄 **自动更新** | 一条命令更新到最新版本（`update` 子命令） |
+| 📥 **一键安装** | 安装脚本自动下载二进制到 `~/.local/bin` |
 
 ## 🚀 快速安装
+
+### 一键安装（推荐）
+
+**Linux / macOS**
+```bash
+curl -fsSL https://github.com/jswh/sshgo/raw/main/install.sh | sh
+```
+
+**Windows (PowerShell)**
+```powershell
+irm https://github.com/jswh/sshgo/raw/main/install.ps1 | iex
+```
+
+自动下载最新 release 二进制到 `~/.local/bin/`。
 
 ### 从源码编译
 
@@ -154,6 +171,18 @@ sshgo config find --tag prod
 sshgo config set-sudo-password db-staging
 ```
 
+### 自动更新
+
+检查最新 release 并更新当前二进制：
+
+```bash
+sshgo update
+```
+
+update 子命令从 GitHub 获取最新版本，与构建时嵌入的版本号比较，
+发现新版本后自动下载并替换二进制。如果二进制在系统目录中，
+会自动 fallback 到 `sudo mv`。
+
 ### 查看帮助
 
 ```bash
@@ -161,6 +190,7 @@ sshgo --help
 sshgo exec --help
 sshgo info --help
 sshgo config --help
+sshgo update --help
 ```
 
 ## 🔐 认证方式
@@ -208,8 +238,13 @@ sshgo/
 ├── exec.go          # 结构化远程命令执行（exec 子命令）
 ├── info.go          # 连接信息展示（info 子命令）
 ├── config.go        # 主机元数据管理（config 子命令）
+├── update.go        # 自动更新（update 子命令）
+├── version.go       # 内嵌版本号
 ├── types.go         # 共享类型：ExecResult, InfoResult, HostMeta, LocalConfig
 ├── password.go      # AES-GCM 加密密码存储
+├── install.sh       # 一键安装脚本 (Unix)
+├── install.ps1      # 一键安装脚本 (Windows)
+├── update_test.go   # update 子命令单元测试
 ├── CONTEXT.md       # 领域术语表
 ├── docs/
 │   └── adr/

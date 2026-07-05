@@ -45,6 +45,8 @@ func main() {
 		handleInfo(args[1:])
 	case "config":
 		handleConfig(args[1:])
+	case "update":
+		handleUpdate(args[1:])
 	default:
 		// Legacy mode: sshgo <host> [command]
 		passwords := &PasswordStore{Passwords: make(map[string]string)}
@@ -106,6 +108,7 @@ func printHelp() {
 	fmt.Println("  exec    Execute a remote command with structured output")
 	fmt.Println("  info    Show connection information for a host")
 	fmt.Println("  config  Manage local host metadata and import SSH config")
+	fmt.Println("  update  Update sshgo to the latest version from GitHub")
 	fmt.Println()
 	fmt.Println("Legacy usage:")
 	fmt.Println("  sshgo <host> [command]")
@@ -278,20 +281,20 @@ func connectToHost(info hostInfo, passwords *PasswordStore, command string) {
 		user = "root"
 	}
 
-	// 1. Agent: keep connection alive during auth
+	// 1. Collect all key signers (agent + file) for a single publickey method
+	var allSigners []ssh.Signer
 	var agentConn net.Conn
-	var methods []ssh.AuthMethod
 	if conn, err := net.Dial("unix", os.Getenv("SSH_AUTH_SOCK")); err == nil {
 		agentConn = conn
 		sshAgent := agent.NewClient(conn)
 		if signers, err := sshAgent.Signers(); err == nil && len(signers) > 0 {
-			methods = append(methods, ssh.PublicKeys(signers...))
+			allSigners = append(allSigners, signers...)
 			fmt.Fprintln(os.Stderr, "Using SSH agent keys")
 		}
 	}
 
-	// 2. Build non-agent auth methods
-	moreMethods, err := buildAuthMethods(hostname, user, identityFile, passwords)
+	// 2. Build non-agent auth methods (file signers + passwords)
+	fileSigners, extraMethods, err := buildAuthMethods(hostname, user, identityFile, passwords)
 	if err != nil {
 		if agentConn != nil {
 			agentConn.Close()
@@ -299,7 +302,14 @@ func connectToHost(info hostInfo, passwords *PasswordStore, command string) {
 		fmt.Printf("Authentication failed: %v\n", err)
 		os.Exit(1)
 	}
-	methods = append(methods, moreMethods...)
+	allSigners = append(allSigners, fileSigners...)
+
+	// Combine all public key signers into ONE method
+	var methods []ssh.AuthMethod
+	if len(allSigners) > 0 {
+		methods = append(methods, ssh.PublicKeys(allSigners...))
+	}
+	methods = append(methods, extraMethods...)
 
 	clientConfig := &ssh.ClientConfig{
 		User:            user,
@@ -372,46 +382,47 @@ func connectToHost(info hostInfo, passwords *PasswordStore, command string) {
 	}
 }
 
-func buildAuthMethods(hostName, user, identityFile string, passwords *PasswordStore) ([]ssh.AuthMethod, error) {
-	var methods []ssh.AuthMethod
+func buildAuthMethods(hostName, user, identityFile string, passwords *PasswordStore) ([]ssh.Signer, []ssh.AuthMethod, error) {
+	var fileSigners []ssh.Signer
+	var extraMethods []ssh.AuthMethod
 
 	// 1. Try configured IdentityFile
 	if identityFile != "" {
 		identityFile = expandPath(identityFile)
 		if signer, err := loadPrivateKey(identityFile); err == nil {
-			methods = append(methods, ssh.PublicKeys(signer))
+			fileSigners = append(fileSigners, signer)
 			fmt.Fprintf(os.Stderr, "Using key: %s\n", identityFile)
 		}
 	}
 
-	// 3. Try default keys
+	// 2. Try default keys (only if no IdentityFile configured)
 	if identityFile == "" {
 		homeDir, _ := os.UserHomeDir()
 		for _, keyName := range []string{"id_rsa", "id_ed25519", "id_ecdsa"} {
 			keyPath := filepath.Join(homeDir, ".ssh", keyName)
 			if signer, err := loadPrivateKey(keyPath); err == nil {
-				methods = append(methods, ssh.PublicKeys(signer))
+				fileSigners = append(fileSigners, signer)
 			}
 		}
 	}
 
-	// 4. Check saved passwords
+	// 3. Check saved passwords
 	savedPasswords := loadSavedPasswords()
 	if savedPasswords.Has(hostName) {
 		savedPwd, err := savedPasswords.Get(hostName)
 		if err == nil {
-			methods = append(methods, ssh.Password(savedPwd))
+			extraMethods = append(extraMethods, ssh.Password(savedPwd))
 			fmt.Fprintln(os.Stderr, "Using saved password")
-			return methods, nil
+			return fileSigners, extraMethods, nil
 		}
 	}
 
-	// 5. Return if we have auth methods
-	if len(methods) > 0 {
-		return methods, nil
+	// 4. Return if we have any auth methods
+	if len(fileSigners) > 0 || len(extraMethods) > 0 {
+		return fileSigners, extraMethods, nil
 	}
 
-	// 6. Prompt for password
+	// 5. Prompt for password
 	prompt := promptui.Prompt{
 		Label: fmt.Sprintf("Enter password for %s@%s", user, hostName),
 		Mask:  '*',
@@ -419,10 +430,10 @@ func buildAuthMethods(hostName, user, identityFile string, passwords *PasswordSt
 
 	password, err := prompt.Run()
 	if err != nil {
-		return nil, fmt.Errorf("failed to enter password: %w", err)
+		return nil, nil, fmt.Errorf("failed to enter password: %w", err)
 	}
 
-	methods = append(methods, ssh.Password(password))
+	extraMethods = append(extraMethods, ssh.Password(password))
 
 	// Ask to save password
 	savePrompt := promptui.Prompt{
@@ -442,7 +453,7 @@ func buildAuthMethods(hostName, user, identityFile string, passwords *PasswordSt
 		}
 	}
 
-	return methods, nil
+	return fileSigners, extraMethods, nil
 }
 
 func loadPrivateKey(path string) (ssh.Signer, error) {

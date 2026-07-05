@@ -37,4 +37,14 @@ The authentication mechanisms available for a Host, described at a granular leve
 The strategy for `exec --sudo` to determine the sudo password, in order: (1) saved sudo password (via `config set-sudo-password`), (2) saved SSH password (reuse), (3) interactive prompt (for key-auth connections without NOPASSWD), (4) NOPASSWD (rely on target host configuration).
 
 **Subcommand Priority**:
-When the first argument matches `exec`, `info`, or `config`, it is treated as a subcommand rather than a host name. This is a deliberate design choice; SSH config hosts named `exec`/`info`/`config` cannot be reached via positional argument (use `config set` with an Alias instead).
+When the first argument matches `exec`, `info`, `config`, or `update`, it is treated as a subcommand rather than a host name. This is a deliberate design choice; SSH config hosts named `exec`/`info`/`config`/`update` cannot be reached via positional argument (use `config set` with an Alias instead).
+
+**update**:
+A subcommand that checks for the latest release on GitHub and replaces the current binary. It uses a HTTP redirect to discover the latest release tag (avoiding API rate limits), compares it with the embedded version string (set via `-ldflags -X main.version=...`), downloads the matching OS/arch artifact, and replaces the running binary. Falls back to `sudo mv` when write permission is denied.
+_Avoid_: upgrade, self-update
+
+**Install Script**:
+A standalone POSIX shell script (`install.sh`) that detects OS/arch via `uname`, fetches the latest release tag from GitHub, downloads the matching binary, and installs it to `~/.local/bin/`. Can be piped directly from GitHub: `curl -fsSL https://github.com/jswh/sshgo/raw/main/install.sh | sh`.
+
+**Version**:
+The current binary version, set at build time via `-ldflags -X main.version=<tag>`. Defaults to `"dev"` in development builds. Release builds embed the Git tag (e.g., `v0.0.1`) and are compared using semantic versioning.

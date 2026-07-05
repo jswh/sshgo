@@ -8,6 +8,7 @@ A lightweight SSH client that reads system SSH config, supports key authenticati
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.20+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![Release](https://img.shields.io/github/v/release/jswh/sshgo?logo=github)](https://github.com/jswh/sshgo/releases/latest)
 [![GitHub Stars](https://img.shields.io/github/stars/jswh/sshgo?style=social)](https://github.com/jswh/sshgo/stargazers)
 
 **English** | [简体中文](docs/zh-CN.md)
@@ -28,8 +29,24 @@ A lightweight SSH client that reads system SSH config, supports key authenticati
 | 📦 **Exec (Structured)** | Run remote commands with structured JSON output (`exec` subcommand) |
 | 🔍 **Info** | Inspect connection details for any host (`info` subcommand) |
 | 🏷️ **Host Metadata** | Manage aliases, notes, tags, and connection priority per host (`config` subcommand) |
+| 🔄 **Auto-Update** | Update to the latest version with a single command (`update` subcommand) |
+| 📥 **One-Click Install** | Install script downloads and places the binary in `~/.local/bin` |
 
 ## 🚀 Quick Install
+
+### One-Click Install (Recommended)
+
+**Linux / macOS:**
+```bash
+curl -fsSL https://github.com/jswh/sshgo/raw/main/install.sh | sh
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://github.com/jswh/sshgo/raw/main/install.ps1 | iex
+```
+
+This downloads the latest release binary for your OS/arch and installs it to `~/.local/bin/`.
 
 ### Build from Source
 
@@ -154,6 +171,19 @@ Configure a sudo password (stored encrypted in `~/.sshgo_passwords`):
 sshgo config set-sudo-password db-staging
 ```
 
+### Update: Auto-Update sshgo
+
+Check for the latest release and update the current binary:
+
+```bash
+sshgo update
+```
+
+The update subcommand fetches the latest release from GitHub, compares the version
+tag with the embedded version (set at build time), and replaces the binary if a
+newer version is found. If the binary is in a system directory, it falls back to
+`sudo mv` automatically.
+
 ### Show Help
 
 ```bash
@@ -161,6 +191,7 @@ sshgo --help
 sshgo exec --help
 sshgo info --help
 sshgo config --help
+sshgo update --help
 ```
 
 ## 🔐 Authentication
@@ -209,8 +240,13 @@ sshgo/
 ├── exec.go          # Structured remote command execution (exec subcommand)
 ├── info.go          # Connection information display (info subcommand)
 ├── config.go        # Local host metadata management (config subcommand)
+├── update.go        # Auto-update (update subcommand)
+├── version.go       # Embedded version string
 ├── types.go         # Shared types: ExecResult, InfoResult, HostMeta, LocalConfig
 ├── password.go      # AES-GCM encrypted password store
+├── install.sh       # One-click install script (Unix)
+├── install.ps1      # One-click install script (Windows)
+├── update_test.go   # Unit tests for update subcommand
 ├── CONTEXT.md       # Domain glossary
 ├── docs/
 │   └── adr/

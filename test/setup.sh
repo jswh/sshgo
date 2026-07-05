@@ -53,6 +53,267 @@ echo -e "${CYAN}========================================${NC}"
 echo ""
 
 # ============================================================================
+# PHASE 0: Update Subcommand Tests
+# ============================================================================
+echo -e "${YELLOW}[Phase 0] Update subcommand tests${NC}"
+echo ""
+
+# Ensure the sshgo binary is rebuilt with the update subcommand
+if command -v go &>/dev/null; then
+    echo "  Rebuilding sshgo with update subcommand..."
+    (cd "$PROJECT_DIR" && GOPROXY=off GONOSUMCHECK='*' GONOSUMDB='*' go build -ldflags="-s -w" -o "$SSHGO" . 2>/dev/null) && \
+        echo -e "  ${GREEN}✓ sshgo rebuilt${NC}" || \
+        echo -e "  ${YELLOW}⚠ Using existing sshgo binary${NC}"
+fi
+
+if ! "$SSHGO" update --help 2>&1 | grep -q "Usage: sshgo update"; then
+    echo -e "  ${RED}✗ sshgo binary does not support 'update' subcommand. Rebuild required.${NC}"
+    echo "  Run: cd $PROJECT_DIR && go build -o $SSHGO ."
+    exit 1
+fi
+
+# Save a copy of the original binary for tests that should not replace it
+ORIG_BIN="$(mktemp -t sshgo-orig-XXXXX)"
+cp "$SSHGO" "$ORIG_BIN"
+echo ""
+
+# ------------------------------------------------------------------
+# 0a: Update --help
+# ------------------------------------------------------------------
+echo "  --- Update Help ---"
+
+OUTPUT=$("$ORIG_BIN" update --help 2>&1 || true)
+assert_contains "update --help: shows usage" "Usage: sshgo update" "$OUTPUT"
+assert_contains "update --help: mentions env var" "SSHGO_UPDATE_SERVER" "$OUTPUT"
+
+OUTPUT=$("$ORIG_BIN" update -h 2>&1 || true)
+assert_contains "update -h: shows usage" "Usage: sshgo update" "$OUTPUT"
+
+# ------------------------------------------------------------------
+# 0b: Mock update server setup
+# ------------------------------------------------------------------
+echo "  --- Mock Server Setup ---"
+
+# Create a mock "binary" that the server will serve
+MOCK_BIN="$(mktemp -t sshgo-mock-bin-XXXXX)"
+cat > "$MOCK_BIN" <<'MOCKEOF'
+#!/bin/sh
+echo "mock sshgo v0.0.1"
+MOCKEOF
+chmod +x "$MOCK_BIN"
+
+# Determine OS/arch for artifact name
+UNAME_S=$(uname -s | tr '[:upper:]' '[:lower:]')
+UNAME_M=$(uname -m)
+case "$UNAME_M" in
+    x86_64|amd64) MOCK_ARCH="amd64" ;;
+    aarch64|arm64) MOCK_ARCH="arm64" ;;
+    *) MOCK_ARCH="$UNAME_M" ;;
+esac
+case "$UNAME_S" in
+    linux) MOCK_OS="linux" ;;
+    darwin) MOCK_OS="darwin" ;;
+    *) MOCK_OS="$UNAME_S" ;;
+esac
+ARTIFACT_NAME="sshgo-${MOCK_OS}-${MOCK_ARCH}"
+
+# Python mock HTTP server script
+MOCK_SERVER_SCRIPT="$(mktemp -t sshgo-mock-server-XXXXX)"
+cat > "$MOCK_SERVER_SCRIPT" <<'PYEOF'
+import sys
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+PORT = int(sys.argv[1])
+BIN_PATH = sys.argv[2]
+ARTIFACT = sys.argv[3]
+
+class MockHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/releases/latest':
+            self.send_response(302)
+            self.send_header('Location', '/releases/tag/v0.0.1')
+            self.end_headers()
+        elif ARTIFACT in self.path and '/releases/download/' in self.path:
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/octet-stream')
+            self.end_headers()
+            with open(BIN_PATH, 'rb') as f:
+                self.wfile.write(f.read())
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b'not found')
+    def log_message(self, format, *args):
+        pass
+
+HTTPServer(('127.0.0.1', PORT), MockHandler).serve_forever()
+PYEOF
+
+# Find a free port
+for try_port in 18923 18924 18925 18926 18927 18928 18929 18930; do
+    if ! lsof -i :$try_port >/dev/null 2>&1; then
+        MOCK_PORT=$try_port
+        break
+    fi
+done
+MOCK_PORT="${MOCK_PORT:-18931}"
+
+echo "  Starting mock update server on port $MOCK_PORT..."
+python3 "$MOCK_SERVER_SCRIPT" "$MOCK_PORT" "$MOCK_BIN" "$ARTIFACT_NAME" &
+MOCK_SERVER_PID=$!
+sleep 1
+
+if ! kill -0 "$MOCK_SERVER_PID" 2>/dev/null; then
+    echo -e "  ${RED}✗ FAIL${NC}: mock server failed to start"
+    exit 1
+fi
+echo -e "  ${GREEN}✓ Mock server running (PID $MOCK_SERVER_PID)${NC}"
+
+MOCK_URL="http://127.0.0.1:${MOCK_PORT}"
+
+disable_strict
+
+# ------------------------------------------------------------------
+# 0c: Dev build update via copy (so $SSHGO stays intact)
+# ------------------------------------------------------------------
+echo "  --- Dev Build Update ---"
+
+DEV_BIN="$(mktemp -t sshgo-dev-XXXXX)"
+cp "$ORIG_BIN" "$DEV_BIN"
+
+OUTPUT=$(SSHGO_UPDATE_SERVER="$MOCK_URL" "$DEV_BIN" update 2>&1 || true)
+assert_contains "update (dev): detects dev build" "Development build detected" "$OUTPUT"
+assert_contains "update (dev): downloads latest" "v0.0.1" "$OUTPUT"
+assert_not_contains "update (dev): no error" "Failed to check for updates" "$OUTPUT"
+assert_not_contains "update (dev): no error" "Download failed" "$OUTPUT"
+
+# Verify the binary was actually replaced with mock content
+DEV_CONTENT=$("$DEV_BIN" 2>&1 || true)
+assert_contains "update (dev): binary was replaced" "mock sshgo v0.0.1" "$DEV_CONTENT"
+
+# ------------------------------------------------------------------
+# 0d: Binary with older version (v0.0.0) -> updates to v0.0.1
+# ------------------------------------------------------------------
+echo "  --- Outdated Binary Update ---"
+
+OLD_BIN="$(mktemp -t sshgo-old-XXXXX)"
+if command -v go &>/dev/null; then
+    echo "  Building test binary with version v0.0.0..."
+    (cd "$PROJECT_DIR" && GOPROXY=off GONOSUMCHECK='*' GONOSUMDB='*' go build -ldflags="-X main.version=v0.0.0" -o "$OLD_BIN" . 2>/dev/null) && \
+        echo -e "  ${GREEN}✓ Built test binary v0.0.0${NC}" || \
+        echo -e "  ${YELLOW}⚠ go build failed, skipping${NC}"
+    
+    if [ -x "$OLD_BIN" ] && "$OLD_BIN" update --help 2>/dev/null | grep -q "sshgo update"; then
+        OUTPUT=$(SSHGO_UPDATE_SERVER="$MOCK_URL" "$OLD_BIN" update 2>&1 || true)
+        assert_contains "update (old): sees newer version" "Updating from v0.0.0 to v0.0.1" "$OUTPUT"
+        assert_contains "update (old): success message" "Successfully updated to v0.0.1" "$OUTPUT"
+        
+        # Verify binary was replaced
+        UPDATED_CONTENT=$("$OLD_BIN" 2>&1 || true)
+        assert_contains "update (old): replaced binary works" "mock sshgo v0.0.1" "$UPDATED_CONTENT"
+    fi
+fi
+
+# ------------------------------------------------------------------
+# 0e: Binary with same version as latest -> already up to date
+# ------------------------------------------------------------------
+echo "  --- Up-to-date Binary Update ---"
+
+CURRENT_BIN="$(mktemp -t sshgo-current-XXXXX)"
+if command -v go &>/dev/null; then
+    echo "  Building test binary with version v0.0.1..."
+    (cd "$PROJECT_DIR" && GOPROXY=off GONOSUMCHECK='*' GONOSUMDB='*' go build -ldflags="-X main.version=v0.0.1" -o "$CURRENT_BIN" . 2>/dev/null) && \
+        echo -e "  ${GREEN}✓ Built test binary v0.0.1${NC}" || \
+        echo -e "  ${YELLOW}⚠ go build failed, skipping${NC}"
+    
+    if [ -x "$CURRENT_BIN" ] && "$CURRENT_BIN" update --help 2>/dev/null | grep -q "sshgo update"; then
+        OUTPUT=$(SSHGO_UPDATE_SERVER="$MOCK_URL" "$CURRENT_BIN" update 2>&1 || true)
+        assert_contains "update (current): already up to date" "Already up to date (v0.0.1)" "$OUTPUT"
+        assert_not_contains "update (current): no download" "Downloading" "$OUTPUT"
+    fi
+fi
+
+# ------------------------------------------------------------------
+# 0f: Error handling - unreachable server (use original binary)
+# ------------------------------------------------------------------
+echo "  --- Error Handling ---"
+
+OUTPUT=$(SSHGO_UPDATE_SERVER="http://127.0.0.1:1" "$ORIG_BIN" update 2>&1 || true)
+assert_contains "update: unreachable server error" "Failed to check for updates" "$OUTPUT"
+
+# ------------------------------------------------------------------
+# 0g: Unknown flag error (use original binary)
+# ------------------------------------------------------------------
+echo "  --- Unknown Flag Error ---"
+
+OUTPUT=$("$ORIG_BIN" update --foo 2>&1 || true)
+assert_contains "update: unknown flag error" "unknown flag" "$OUTPUT"
+assert_contains "update: unknown flag shows usage" "Usage: sshgo update" "$OUTPUT"
+
+# ------------------------------------------------------------------
+# 0h: Mock server redirect with trailing slash
+# ------------------------------------------------------------------
+echo "  --- Redirect Edge Cases ---"
+
+MOCK_SERVER_SCRIPT2="$(mktemp -t sshgo-mock-server2-XXXXX)"
+cat > "$MOCK_SERVER_SCRIPT2" <<'PYEOF'
+import sys
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+PORT = int(sys.argv[1])
+BIN_PATH = sys.argv[2]
+ARTIFACT = sys.argv[3]
+
+class MockHandler2(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/releases/latest':
+            self.send_response(302)
+            self.send_header('Location', '/releases/tag/v0.0.2/')  # trailing slash
+            self.end_headers()
+        elif ARTIFACT in self.path and '/releases/download/' in self.path:
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/octet-stream')
+            self.end_headers()
+            with open(BIN_PATH, 'rb') as f:
+                self.wfile.write(f.read())
+        else:
+            self.send_response(404)
+            self.end_headers()
+    def log_message(self, format, *args):
+        pass
+
+HTTPServer(('127.0.0.1', PORT), MockHandler2).serve_forever()
+PYEOF
+
+MOCK_PORT2=18941
+python3 "$MOCK_SERVER_SCRIPT2" "$MOCK_PORT2" "$MOCK_BIN" "$ARTIFACT_NAME" &
+MOCK_SERVER_PID2=$!
+sleep 1
+MOCK_URL2="http://127.0.0.1:${MOCK_PORT2}"
+
+# Use a fresh copy of the original binary
+TRAIL_BIN="$(mktemp -t sshgo-trail-XXXXX)"
+cp "$ORIG_BIN" "$TRAIL_BIN"
+OUTPUT=$(SSHGO_UPDATE_SERVER="$MOCK_URL2" "$TRAIL_BIN" update 2>&1 || true)
+assert_contains "update: trailing slash redirect" "v0.0.2" "$OUTPUT"
+
+kill "$MOCK_SERVER_PID2" 2>/dev/null || true
+rm -f "$MOCK_SERVER_SCRIPT2" "$TRAIL_BIN"
+
+# ------------------------------------------------------------------
+# 0i: Cleanup mock server and temp files
+# ------------------------------------------------------------------
+echo "  --- Cleanup ---"
+
+kill "$MOCK_SERVER_PID" 2>/dev/null || true
+rm -f "$MOCK_BIN" "$MOCK_SERVER_SCRIPT" "$OLD_BIN" "$CURRENT_BIN" "$DEV_BIN" "$ORIG_BIN" 2>/dev/null || true
+
+echo -e "  ${GREEN}✓ Update test cleanup complete${NC}"
+echo ""
+
+enable_strict
+
+# ============================================================================
 # PHASE 1: Docker Setup
 # ============================================================================
 echo -e "${YELLOW}[Phase 1] Setting up Docker test environment${NC}"

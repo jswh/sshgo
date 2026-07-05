@@ -170,20 +170,31 @@ func executeRemote(info hostInfo, command string, flags execFlags) ExecResult {
 		user = "root"
 	}
 
-	// 1. Agent: keep connection alive during auth
+	// 1. Collect all key signers (agent + file) for a single publickey method
+	var allSigners []ssh.Signer
 	var agentConn net.Conn
-	var methods []ssh.AuthMethod
 	if conn, err := net.Dial("unix", os.Getenv("SSH_AUTH_SOCK")); err == nil {
 		agentConn = conn
 		sshAgent := agent.NewClient(conn)
 		if signers, err := sshAgent.Signers(); err == nil && len(signers) > 0 {
-			methods = append(methods, ssh.PublicKeys(signers...))
+			allSigners = append(allSigners, signers...)
 			fmt.Fprintln(os.Stderr, "exec: using SSH agent keys")
 		}
 	}
 
-	// 2. Build non-agent auth methods
-	passwordForSudo := buildAuthMethodsNonInteractive(hostname, user, identityFile, flags.Sudo, &methods)
+	// 2. Build non-agent auth methods (file signers + sudo password)
+	fileSigners, passwordForSudo, hasPassword := buildAuthMethodsNonInteractive(hostname, user, identityFile, flags.Sudo)
+	allSigners = append(allSigners, fileSigners...)
+
+	// Combine all public key signers into ONE method
+	var methods []ssh.AuthMethod
+	if len(allSigners) > 0 {
+		methods = append(methods, ssh.PublicKeys(allSigners...))
+	}
+	if hasPassword {
+		// Password method is separate (different method name "password")
+		methods = append(methods, ssh.Password(passwordForSudo))
+	}
 	if len(methods) == 0 {
 		if agentConn != nil {
 			agentConn.Close()
@@ -258,15 +269,17 @@ func executeRemote(info hostInfo, command string, flags execFlags) ExecResult {
 	}
 }
 
-// buildAuthMethodsNonInteractive adds non-agent auth methods to the given slice.
-// Returns the sudo password if available.
+// buildAuthMethodsNonInteractive collects file-based key signers and returns them
+// along with a sudo password if available.
 // Priority for sudo password: saved sudo password > saved SSH password > interactive prompt.
-func buildAuthMethodsNonInteractive(hostName, user, identityFile string, needSudo bool, methods *[]ssh.AuthMethod) string {
+func buildAuthMethodsNonInteractive(hostName, user, identityFile string, needSudo bool) ([]ssh.Signer, string, bool) {
+	var fileSigners []ssh.Signer
+
 	// Try configured IdentityFile (skip passphrase-protected keys non-interactively)
 	if identityFile != "" {
 		identityFile = expandPath(identityFile)
 		if signer := tryLoadKey(identityFile); signer != nil {
-			*methods = append(*methods, ssh.PublicKeys(signer))
+			fileSigners = append(fileSigners, signer)
 			fmt.Fprintln(os.Stderr, "exec: using identity file")
 		}
 	}
@@ -277,13 +290,12 @@ func buildAuthMethodsNonInteractive(hostName, user, identityFile string, needSud
 		for _, keyName := range []string{"id_rsa", "id_ed25519", "id_ecdsa"} {
 			keyPath := filepath.Join(homeDir, ".ssh", keyName)
 			if signer := tryLoadKey(keyPath); signer != nil {
-				*methods = append(*methods, ssh.PublicKeys(signer))
-				break
+				fileSigners = append(fileSigners, signer)
 			}
 		}
 	}
 
-	hasKeyAuth := len(*methods) > 0
+	hasKeyAuth := len(fileSigners) > 0
 
 	// If sudo is needed or no key auth, try saved passwords (may prompt for master password)
 	if needSudo || !hasKeyAuth {
@@ -292,21 +304,15 @@ func buildAuthMethodsNonInteractive(hostName, user, identityFile string, needSud
 			// First try saved sudo password
 			if needSudo && store.HasSudoPassword(hostName) {
 				if pwd, err := store.GetSudoPassword(hostName); err == nil {
-					if !hasKeyAuth {
-						*methods = append(*methods, ssh.Password(pwd))
-					}
 					fmt.Fprintln(os.Stderr, "exec: using saved sudo password")
-					return pwd
+					return fileSigners, pwd, !hasKeyAuth
 				}
 			}
 			// Then try saved SSH password
 			if store.Has(hostName) {
 				if pwd, err := store.Get(hostName); err == nil {
-					if !hasKeyAuth {
-						*methods = append(*methods, ssh.Password(pwd))
-					}
 					fmt.Fprintln(os.Stderr, "exec: using saved password")
-					return pwd
+					return fileSigners, pwd, !hasKeyAuth
 				}
 			}
 		}
@@ -315,11 +321,11 @@ func buildAuthMethodsNonInteractive(hostName, user, identityFile string, needSud
 	// Key auth + sudo + no saved passwords → prompt for sudo password
 	if needSudo && hasKeyAuth {
 		if pwd := promptSudoPassword(hostName, user); pwd != "" {
-			return pwd
+			return fileSigners, pwd, false
 		}
 	}
 
-	return ""
+	return fileSigners, "", false
 }
 
 // promptSudoPassword interactively prompts for a sudo password with option to save.
