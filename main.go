@@ -7,10 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/manifoldco/promptui"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/term"
+
+	"sshgo/internal/ui"
 )
 
 type hostInfo struct {
@@ -147,13 +148,7 @@ func interactiveSelect() {
 		items = append(items, fmt.Sprintf("%2d. %-20s %-8s%s", i+1, h.Name, h.Source, status))
 	}
 
-	prompt := promptui.Select{
-		Label: "Select host to connect",
-		Items: items,
-		Size:  20,
-	}
-
-	idx, _, err := prompt.Run()
+	idx, _, err := ui.Select("Select host to connect", items)
 	if err != nil {
 		fmt.Printf("Selection failed: %v\n", err)
 		os.Exit(1)
@@ -182,19 +177,11 @@ func initPasswordStore() (*PasswordStore, error) {
 	path := getPasswordStorePath()
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		fmt.Println("First time setup: Please set a master password for encryption")
-		prompt := promptui.Prompt{
-			Label: "Set master password",
-			Mask:  '*',
-		}
-		masterPwd, err := prompt.Run()
+		masterPwd, err := ui.Password("Set master password")
 		if err != nil {
 			return nil, fmt.Errorf("failed to set master password: %w", err)
 		}
-		prompt2 := promptui.Prompt{
-			Label: "Confirm master password",
-			Mask:  '*',
-		}
-		confirmPwd, err := prompt2.Run()
+		confirmPwd, err := ui.Password("Confirm master password")
 		if err != nil {
 			return nil, fmt.Errorf("failed to confirm master password: %w", err)
 		}
@@ -204,11 +191,7 @@ func initPasswordStore() (*PasswordStore, error) {
 		return LoadPasswordStore(masterPwd)
 	}
 
-	prompt := promptui.Prompt{
-		Label: "Enter master password",
-		Mask:  '*',
-	}
-	masterPwd, err := prompt.Run()
+	masterPwd, err := ui.Password("Enter master password")
 	if err != nil {
 		return nil, fmt.Errorf("failed to enter master password: %w", err)
 	}
@@ -423,12 +406,7 @@ func buildAuthMethods(hostName, user, identityFile string, passwords *PasswordSt
 	}
 
 	// 5. Prompt for password
-	prompt := promptui.Prompt{
-		Label: fmt.Sprintf("Enter password for %s@%s", user, hostName),
-		Mask:  '*',
-	}
-
-	password, err := prompt.Run()
+	password, err := ui.Password(fmt.Sprintf("Enter password for %s@%s", user, hostName))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to enter password: %w", err)
 	}
@@ -436,13 +414,7 @@ func buildAuthMethods(hostName, user, identityFile string, passwords *PasswordSt
 	extraMethods = append(extraMethods, ssh.Password(password))
 
 	// Ask to save password
-	savePrompt := promptui.Prompt{
-		Label:     "Save password? (y/n)",
-		Default:   "n",
-		AllowEdit: true,
-	}
-	saveAnswer, _ := savePrompt.Run()
-	if strings.ToLower(strings.TrimSpace(saveAnswer)) == "y" {
+	if ui.YesNo("Save password?", "n") {
 		store, err := initPasswordStore()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to initialize password store: %v\n", err)
@@ -468,11 +440,7 @@ func loadPrivateKey(path string) (ssh.Signer, error) {
 	}
 
 	// Try with passphrase
-	passphrasePrompt := promptui.Prompt{
-		Label: fmt.Sprintf("Enter passphrase for %s", path),
-		Mask:  '*',
-	}
-	passphrase, _ := passphrasePrompt.Run()
+	passphrase, _ := ui.Password(fmt.Sprintf("Enter passphrase for %s", path))
 	if passphrase == "" {
 		return nil, fmt.Errorf("passphrase required")
 	}
@@ -485,11 +453,7 @@ func loadSavedPasswords() *PasswordStore {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return &PasswordStore{Passwords: make(map[string]string)}
 	}
-	prompt := promptui.Prompt{
-		Label: "Enter master password",
-		Mask:  '*',
-	}
-	masterPwd, err := prompt.Run()
+	masterPwd, err := ui.Password("Enter master password")
 	if err != nil {
 		return &PasswordStore{Passwords: make(map[string]string)}
 	}

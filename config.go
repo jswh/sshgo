@@ -9,7 +9,8 @@ import (
 	"strings"
 
 	"github.com/kevinburke/ssh_config"
-	"github.com/manifoldco/promptui"
+
+	"sshgo/internal/ui"
 )
 
 const localConfigVersion = "1"
@@ -421,21 +422,13 @@ func handleSetSudoPassword(args []string) {
 	}
 	host := args[0]
 
-	prompt := promptui.Prompt{
-		Label: fmt.Sprintf("Enter sudo password for %s", host),
-		Mask:  '*',
-	}
-	pwd, err := prompt.Run()
+	pwd, err := ui.Password(fmt.Sprintf("Enter sudo password for %s", host))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to read password: %v\n", err)
 		os.Exit(1)
 	}
 
-	prompt2 := promptui.Prompt{
-		Label: "Confirm sudo password",
-		Mask:  '*',
-	}
-	confirm, err := prompt2.Run()
+	confirm, err := ui.Password("Confirm sudo password")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to read password: %v\n", err)
 		os.Exit(1)
