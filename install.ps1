@@ -3,7 +3,13 @@
 # Usage: irm https://github.com/jswh/sshgo/raw/main/install.ps1 | iex
 
 $Repo = "jswh/sshgo"
-$InstallDir = Join-Path $HOME ".local" "bin"
+
+# --- Compatible Join-Path (PS 5.1 only takes 2 args) ---
+function Join-Path2([string]$a, [string]$b, [string]$c) {
+    if ($c) { Join-Path (Join-Path $a $b) $c } else { Join-Path $a $b }
+}
+
+$InstallDir = Join-Path2 $HOME ".local" "bin"
 
 # --- Detect OS and architecture ---
 $IsWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
@@ -32,7 +38,6 @@ if (-not $IsWindows) {
 
 # Windows arm64 is rare but possible
 if ($OS -eq "windows" -and $Arch -eq "arm64") {
-    # Check if this is actually an ARM64 Windows
     try {
         $armCheck = Get-CimInstance Win32_Processor | Select-Object -First 1
         if ($armCheck.Architecture -eq 5) { # ARM64
@@ -60,16 +65,16 @@ try {
     $Response = $Request.GetResponse()
     $Location = $Response.GetResponseHeader("Location")
     $Response.Close()
-    
+
     if (-not $Location) {
         Write-Error "Failed to determine latest release: no redirect location"
         exit 1
     }
-    
+
     $Tag = $Location -replace '.*/tag/', ''
     $Tag = $Tag -replace '/.*', ''  # Remove trailing path
     $Tag = $Tag -replace '\?.*', ''  # Remove query string
-    
+
     if (-not $Tag) {
         Write-Error "Failed to parse tag from redirect: $Location"
         exit 1
@@ -84,12 +89,14 @@ $DownloadUrl = "https://github.com/${Repo}/releases/download/${Tag}/${BinaryName
 Write-Host "Latest version: ${Tag}"
 Write-Host "Downloading ${BinaryName} ..."
 
-# --- Download ---
-$InstallPath = Join-Path $InstallDir "sshgo.exe"
-New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+# --- Create install directory ---
+[void](New-Item -ItemType Directory -Force -Path $InstallDir)
 
+$InstallPath = Join-Path $InstallDir "sshgo.exe"
+
+# --- Download ---
 try {
-    $ProgressPreference = 'SilentlyContinue'  # Speed up download
+    $ProgressPreference = 'SilentlyContinue'
     Invoke-WebRequest -Uri $DownloadUrl -OutFile $InstallPath -UseBasicParsing
     Write-Host "Downloaded to ${InstallPath}"
 } catch {
@@ -102,11 +109,13 @@ $UserPath = [Environment]::GetEnvironmentVariable("PATH", "User")
 if ($UserPath -notlike "*${InstallDir}*") {
     $NewPath = if ($UserPath) { "${UserPath};${InstallDir}" } else { $InstallDir }
     [Environment]::SetEnvironmentVariable("PATH", $NewPath, "User")
-    # Update current session
-    $env:PATH = "${env:PATH};${InstallDir}"
+    # Also update current session so sshgo works immediately
+    $env:Path = "${env:Path};${InstallDir}"
     Write-Host ""
-    Write-Host "Added ${InstallDir} to your PATH (reopen terminal for changes to take effect in new sessions)."
+    Write-Host "Added ${InstallDir} to your PATH."
+    Write-Host "sshgo is now available in this terminal."
 } else {
+    Write-Host ""
     Write-Host "${InstallDir} is already in your PATH."
 }
 
