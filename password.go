@@ -4,21 +4,59 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"golang.org/x/crypto/argon2"
 )
 
 const sudoKeySuffix = "/sudo"
 
+// Fixed KDF parameters for the v2 password store. Changing them makes existing
+// stores unreadable, so they are constants rather than configuration.
+const (
+	passwordStoreVersion = 2
+	passwordStoreKDF     = "argon2id"
+
+	argon2Time    uint32 = 1
+	argon2Memory  uint32 = 64 * 1024 // KiB
+	argon2Threads uint8  = 4
+
+	derivedKeyLength = 32
+	saltLength       = 16
+)
+
+// KDFParams records the argon2id cost parameters used for a store.
+type KDFParams struct {
+	Time    uint32 `json:"time"`
+	Memory  uint32 `json:"memory"`
+	Threads uint8  `json:"threads"`
+}
+
 type PasswordStore struct {
+	Version   int               `json:"version"`
+	KDF       string            `json:"kdf"`
+	Params    KDFParams         `json:"params"`
 	Passwords map[string]string `json:"passwords"`
 	Salt      string            `json:"salt"`
 	path      string
 	key       []byte
+}
+
+func defaultKDFParams() KDFParams {
+	return KDFParams{Time: argon2Time, Memory: argon2Memory, Threads: argon2Threads}
+}
+
+// validate guards against a corrupted or hostile store file whose parameters
+// would make argon2.IDKey panic (zero rounds or zero parallelism).
+func (p KDFParams) validate() error {
+	if p.Time < 1 || p.Threads < 1 || p.Memory < 8*uint32(p.Threads) {
+		return fmt.Errorf("invalid KDF parameters in password store (time=%d, memory=%d, threads=%d)", p.Time, p.Memory, p.Threads)
+	}
+	return nil
 }
 
 func getPasswordStorePath() string {
@@ -29,50 +67,86 @@ func getPasswordStorePath() string {
 	return filepath.Join(homeDir, ".sshgo_passwords")
 }
 
-func deriveKey(password string, salt []byte) []byte {
-	h := sha256.New()
-	h.Write([]byte(password))
-	h.Write(salt)
-	return h.Sum(nil)
+func deriveKey(password string, salt []byte, params KDFParams) []byte {
+	return argon2.IDKey([]byte(password), salt, params.Time, params.Memory, params.Threads, derivedKeyLength)
+}
+
+func newPasswordStore(masterPassword, path string) (*PasswordStore, error) {
+	salt := make([]byte, saltLength)
+	if _, err := rand.Read(salt); err != nil {
+		return nil, fmt.Errorf("failed to generate salt: %w", err)
+	}
+
+	params := defaultKDFParams()
+	store := &PasswordStore{
+		Version:   passwordStoreVersion,
+		KDF:       passwordStoreKDF,
+		Params:    params,
+		Passwords: make(map[string]string),
+		Salt:      base64.StdEncoding.EncodeToString(salt),
+		path:      path,
+	}
+	store.key = deriveKey(masterPassword, salt, params)
+	return store, nil
 }
 
 func LoadPasswordStore(masterPassword string) (*PasswordStore, error) {
 	path := getPasswordStorePath()
-	store := &PasswordStore{
-		Passwords: make(map[string]string),
-		path:      path,
-	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			salt := make([]byte, 16)
-			rand.Read(salt)
-			store.Salt = base64.StdEncoding.EncodeToString(salt)
-			store.key = deriveKey(masterPassword, salt)
-			return store, nil
+			return newPasswordStore(masterPassword, path)
 		}
 		return nil, err
 	}
 
+	store := &PasswordStore{path: path}
 	if err := json.Unmarshal(data, store); err != nil {
 		return nil, err
 	}
 
-	salt, _ := base64.StdEncoding.DecodeString(store.Salt)
-	store.key = deriveKey(masterPassword, salt)
+	// Pre-argon2id stores carry no version/kdf/params. There is no migration
+	// path: refuse to open them instead of silently deriving the wrong key.
+	if store.Version != passwordStoreVersion {
+		return nil, fmt.Errorf("password store uses the old format and cannot be opened; please remove it and save your passwords again")
+	}
 
-	if len(store.Passwords) > 0 {
-		for k, v := range store.Passwords {
-			if _, err := store.decryptValue(v); err != nil {
-				return nil, fmt.Errorf("invalid master password or corrupted data")
-			}
-			_ = k
-			break
-		}
+	if store.KDF != passwordStoreKDF {
+		return nil, fmt.Errorf("unsupported password store KDF %q", store.KDF)
+	}
+
+	if err := store.Params.validate(); err != nil {
+		return nil, err
+	}
+
+	salt, err := base64.StdEncoding.DecodeString(store.Salt)
+	if err != nil {
+		return nil, fmt.Errorf("invalid password store salt: %w", err)
+	}
+	store.key = deriveKey(masterPassword, salt, store.Params)
+
+	if store.Passwords == nil {
+		store.Passwords = make(map[string]string)
+	}
+
+	if err := store.verifyKey(); err != nil {
+		return nil, err
 	}
 
 	return store, nil
+}
+
+// verifyKey decrypts every entry to detect a wrong master password or a
+// corrupted entry: the GCM tag fails as soon as the derived key is wrong.
+// Empty stores skip the check.
+func (s *PasswordStore) verifyKey() error {
+	for _, v := range s.Passwords {
+		if _, err := s.decryptValue(v); err != nil {
+			return fmt.Errorf("invalid master password or corrupted data")
+		}
+	}
+	return nil
 }
 
 func (s *PasswordStore) Save() error {
