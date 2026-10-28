@@ -1,3 +1,9 @@
 sshgo
 test/results.txt
 .deps/
+
+# 本地 issue tracker 工作区（Matt Pocock 技能流），不提交
+.scratch/
+
+# 技能流配置文档（本地保留，不入库）
+docs/agents/
