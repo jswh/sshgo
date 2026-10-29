@@ -230,6 +230,11 @@ sshgo config set-sudo-password db-staging
 
 使用密钥登录且远程没有 NOPASSWD 时，`exec --sudo` 会提示输入 sudo 密码并可选保存。
 
+已保存的口令按**你寻址的名字**存放，因此 `set-sudo-password` 与 `exec` 要用同一个名字。
+Alias 与它指向的 Host 名是两个不同的键：为 `db-staging` 存的口令，在运行
+`exec --sudo db-staging-alias` 时不会命中。如果寻址的名字没有对应条目，`exec`
+会回落到解析后的 Hostname，以兼容按地址存的旧条目。
+
 ## 🗂️ 项目结构
 
 ```

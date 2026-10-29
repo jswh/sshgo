@@ -32,6 +32,7 @@
 - 元数据与口令**分文件存放**（ADR-0001）：元数据非敏感、读得频繁、不需要主口令；口令敏感、只在认证时读、加密存放。
 - **子命令优先于主机名**：首个参数命中 `exec`/`info`/`config`/`update` 即按子命令处理 ⇒ 同名 SSH config host 无法用位置参数访问（改用 Alias）。这是有意的设计，不是 bug。
 - `exec --sudo` 的 **Sudo Password Priority** 四级有序：已存 sudo 口令 → 复用已存 SSH 口令 → 交互提示 → 依赖目标机 NOPASSWD。
+- 上述两处口令查找与交互提示的保存，都按 **Credential Key** 定位：用户寻址的名字优先，其次 Host 名，最后回落解析后的 Hostname（仅为兼容按地址存的旧条目）。存与取必须用同一套键序，否则存了也查不到（ticket 01 的原始缺陷）。
 - `info` 的 **Auth Methods** 只描述粒度（如 `SSH Agent (3 keys), Password (saved)`），**永不**输出 key 路径、口令或 passphrase。
 
 ## 开发约定

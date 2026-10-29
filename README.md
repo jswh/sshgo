@@ -232,6 +232,12 @@ sshgo config set-sudo-password db-staging
 When using key authentication and no NOPASSWD is configured, `exec --sudo` will
 prompt for a sudo password with an option to save it.
 
+Saved passwords are filed under the name you address, so use the same name for
+`set-sudo-password` and `exec`. An Alias and the Host name it points at are
+distinct keys: a password saved for `db-staging` is not used when you run
+`exec --sudo db-staging-alias`. If no entry matches the addressed name, `exec`
+falls back to the resolved Hostname so entries saved by address keep working.
+
 ## 🗂️ Project Structure
 
 ```

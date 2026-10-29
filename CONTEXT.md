@@ -33,8 +33,12 @@ _Avoid_: nickname, shortcut
 **Auth Methods** (in info output):
 The authentication mechanisms available for a Host, described at a granular level but without exposing secrets. Example: `SSH Agent (3 keys), Password (saved)`. Never includes key paths, passwords, or passphrases.
 
+**Credential Key**:
+The name a saved credential is filed under: the name the user addresses, so an Alias and the Host name it points at can each hold their own credential. Lookup tries the addressed name, then the canonical Host name, then the resolved Hostname — the last only so entries saved by address still match.
+_Avoid_: lookup key, store key, hostname key
+
 **Sudo Password Priority**:
-The strategy for `exec --sudo` to determine the sudo password, in order: (1) saved sudo password (via `config set-sudo-password`), (2) saved SSH password (reuse), (3) interactive prompt (for key-auth connections without NOPASSWD), (4) NOPASSWD (rely on target host configuration).
+The strategy for `exec --sudo` to determine the sudo password, in order: (1) saved sudo password (via `config set-sudo-password`, looked up by Credential Key), (2) saved SSH password (reuse, same key order), (3) interactive prompt (for key-auth connections without NOPASSWD; a password entered here is saved under the addressed Credential Key), (4) NOPASSWD (rely on target host configuration).
 
 **Subcommand Priority**:
 When the first argument matches `exec`, `info`, `config`, or `update`, it is treated as a subcommand rather than a host name. This is a deliberate design choice; SSH config hosts named `exec`/`info`/`config`/`update` cannot be reached via positional argument (use `config set` with an Alias instead).
