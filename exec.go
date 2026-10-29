@@ -359,7 +359,7 @@ func buildAuthMethodsNonInteractive(cred credentialTarget, identityFile string, 
 // The password is saved under the addressed host key, matching
 // `config set-sudo-password <host>`.
 func promptSudoPassword(cred credentialTarget) string {
-	hostKey := cred.primaryKey()
+	hostKey := cred.Keys[0]
 	if !isInteractive() {
 		fmt.Fprintf(os.Stderr, "sudo password required for %s@%s. Use `sshgo config set-sudo-password %s` to set one.\n", cred.User, cred.Host, hostKey)
 		return ""

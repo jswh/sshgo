@@ -187,6 +187,27 @@ func TestLookupSudoPasswordPrefersHostKeyOverHostname(t *testing.T) {
 	}
 }
 
+// The interactive prompt saves under the addressed key; that choice must be
+// readable by the lookup path, otherwise saving then re-running loses it.
+func TestSudoPasswordSavedUnderAddressedKeyIsFound(t *testing.T) {
+	setupTempHome(t)
+
+	store, err := LoadPasswordStore("master-pass")
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+
+	keys := credentialKeys("acchost", "acchost", "127.0.0.1")
+	if err := store.SetSudoPassword(keys[0], "prompted-pw"); err != nil {
+		t.Fatalf("set sudo password: %v", err)
+	}
+
+	got, ok := lookupSudoPassword(store, keys)
+	if !ok || got != "prompted-pw" {
+		t.Fatal("a password saved under the first credential key was not found by the lookup")
+	}
+}
+
 func TestLookupSavedPasswordUsesHostKey(t *testing.T) {
 	setupTempHome(t)
 
