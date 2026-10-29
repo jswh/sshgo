@@ -101,36 +101,7 @@ func handleInfo(args []string) {
 }
 
 func buildInfoResult(info hostInfo) InfoResult {
-	hostname := info.Hostname
-	port := info.Port
-	user := info.User
-	identityFile := info.IdentityFile
-	source := info.Source
-
-	// For direct addresses, parse from the name string
-	if source == "direct" {
-		name := info.Name
-		if idx := strings.Index(name, "@"); idx >= 0 {
-			user = name[:idx]
-			name = name[idx+1:]
-		}
-		if idx := strings.LastIndex(name, ":"); idx >= 0 {
-			hostname = name[:idx]
-			port = name[idx+1:]
-		} else {
-			hostname = name
-		}
-	}
-
-	if hostname == "" {
-		hostname = info.Name
-	}
-	if port == "" {
-		port = "22"
-	}
-	if user == "" {
-		user = "root"
-	}
+	hostname, port, user, identityFile := resolveConnection(info)
 
 	// Detect available auth methods (non-interactive, non-sensitive)
 	authMethods := detectAuthMethods(hostname, user, identityFile)
@@ -140,7 +111,7 @@ func buildInfoResult(info hostInfo) InfoResult {
 		Hostname:    hostname,
 		Port:        port,
 		User:        user,
-		Source:      source,
+		Source:      info.Source,
 		AuthMethods: authMethods,
 	}
 }

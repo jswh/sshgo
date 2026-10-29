@@ -234,35 +234,7 @@ func findHost(hosts []hostInfo, name string) (hostInfo, bool) {
 }
 
 func connectToHost(info hostInfo, passwords *PasswordStore, command string) {
-	hostname := info.Hostname
-	port := info.Port
-	user := info.User
-	identityFile := info.IdentityFile
-
-	// For direct addresses, parse from the name string
-	if info.Source == "direct" {
-		name := info.Name
-		if idx := strings.Index(name, "@"); idx >= 0 {
-			user = name[:idx]
-			name = name[idx+1:]
-		}
-		if idx := strings.LastIndex(name, ":"); idx >= 0 {
-			hostname = name[:idx]
-			port = name[idx+1:]
-		} else {
-			hostname = name
-		}
-	}
-
-	if hostname == "" {
-		hostname = info.Name
-	}
-	if port == "" {
-		port = "22"
-	}
-	if user == "" {
-		user = "root"
-	}
+	hostname, port, user, identityFile := resolveConnection(info)
 
 	// 1. Collect all key signers (agent + file) for a single publickey method
 	var allSigners []ssh.Signer

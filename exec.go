@@ -50,35 +50,14 @@ func handleExec(args []string) {
 	hostName := args[0]
 	command := strings.Join(args[1:], " ")
 
-	passwords := &PasswordStore{Passwords: make(map[string]string)}
-	hosts := buildHostList(passwords)
-
-	_, hostname, _ := parseUserHost(hostName)
-
-	info, found := findHost(hosts, hostName)
-
+	target, found := resolveExecTarget(hostName)
 	if !found {
-		// Try alias resolution
-		aliasInfo := resolveAlias(hostName)
-		if aliasInfo.Name != "" {
-			info = aliasInfo
-			found = true
-		}
-	}
-
-	if !found {
-		if hostname == "" {
-			fmt.Fprintf(os.Stderr, "Host %q not found. Run `sshgo config import` to import from ~/.ssh/config.\n", hostName)
-			os.Exit(1)
-		}
-		info = hostInfo{
-			Name:   hostName,
-			Source: "direct",
-		}
+		fmt.Fprintf(os.Stderr, "Host %q not found. Run `sshgo config import` to import from ~/.ssh/config.\n", hostName)
+		os.Exit(1)
 	}
 
 	start := time.Now()
-	result := executeRemote(info, command, flags)
+	result := executeRemote(target, command, flags)
 	result.Duration = time.Since(start).Round(time.Millisecond).String()
 
 	if flags.Raw {
@@ -89,6 +68,82 @@ func handleExec(args []string) {
 
 	fmt.Println(result.JSON())
 	os.Exit(result.ExitCode)
+}
+
+// execTarget is a resolved Host plus the credential lookup keys for it.
+type execTarget struct {
+	Info hostInfo
+	Cred credentialTarget
+}
+
+// resolveExecTarget resolves the addressed name into a dialable Host and the
+// password-store keys to try. The addressed name is kept as the primary key so
+// credentials saved by `config set-sudo-password <host>` are found.
+func resolveExecTarget(addressed string) (execTarget, bool) {
+	hosts := buildHostList(&PasswordStore{Passwords: make(map[string]string)})
+	_, hostname, _ := parseUserHost(addressed)
+
+	info, found := findHost(hosts, addressed)
+	if !found {
+		// Try alias resolution
+		if aliasInfo := resolveAlias(addressed); aliasInfo.Name != "" {
+			info, found = aliasInfo, true
+		}
+	}
+
+	if !found {
+		if hostname == "" {
+			return execTarget{}, false
+		}
+		info = hostInfo{
+			Name:   addressed,
+			Source: "direct",
+		}
+	}
+
+	resolvedHost, _, resolvedUser, _ := resolveConnection(info)
+	return execTarget{
+		Info: info,
+		Cred: credentialTarget{
+			Keys: credentialKeys(addressed, info.Name, resolvedHost),
+			Host: resolvedHost,
+			User: resolvedUser,
+		},
+	}, true
+}
+
+// resolveConnection fills in defaults for a Host's connection details.
+func resolveConnection(info hostInfo) (hostname, port, user, identityFile string) {
+	hostname = info.Hostname
+	port = info.Port
+	user = info.User
+	identityFile = info.IdentityFile
+
+	// For direct addresses, parse from the name string
+	if info.Source == "direct" {
+		name := info.Name
+		if idx := strings.Index(name, "@"); idx >= 0 {
+			user = name[:idx]
+			name = name[idx+1:]
+		}
+		if idx := strings.LastIndex(name, ":"); idx >= 0 {
+			hostname = name[:idx]
+			port = name[idx+1:]
+		} else {
+			hostname = name
+		}
+	}
+
+	if hostname == "" {
+		hostname = info.Name
+	}
+	if port == "" {
+		port = "22"
+	}
+	if user == "" {
+		user = "root"
+	}
+	return hostname, port, user, identityFile
 }
 
 // resolveAlias looks up a host by alias in local config.
@@ -139,36 +194,8 @@ func parseExecFlags(args *[]string) execFlags {
 }
 
 // executeRemote dials the host, runs a command, and returns structured output.
-func executeRemote(info hostInfo, command string, flags execFlags) ExecResult {
-	hostname := info.Hostname
-	port := info.Port
-	user := info.User
-	identityFile := info.IdentityFile
-
-	// For direct addresses, parse from the name string
-	if info.Source == "direct" {
-		name := info.Name
-		if idx := strings.Index(name, "@"); idx >= 0 {
-			user = name[:idx]
-			name = name[idx+1:]
-		}
-		if idx := strings.LastIndex(name, ":"); idx >= 0 {
-			hostname = name[:idx]
-			port = name[idx+1:]
-		} else {
-			hostname = name
-		}
-	}
-
-	if hostname == "" {
-		hostname = info.Name
-	}
-	if port == "" {
-		port = "22"
-	}
-	if user == "" {
-		user = "root"
-	}
+func executeRemote(target execTarget, command string, flags execFlags) ExecResult {
+	hostname, port, user, identityFile := resolveConnection(target.Info)
 
 	// 1. Collect all key signers (agent + file) for a single publickey method
 	var allSigners []ssh.Signer
@@ -183,7 +210,7 @@ func executeRemote(info hostInfo, command string, flags execFlags) ExecResult {
 	}
 
 	// 2. Build non-agent auth methods (file signers + sudo password)
-	fileSigners, passwordForSudo, hasPassword := buildAuthMethodsNonInteractive(hostname, user, identityFile, flags.Sudo)
+	fileSigners, passwordForSudo, hasPassword := buildAuthMethodsNonInteractive(target.Cred, identityFile, flags.Sudo)
 	allSigners = append(allSigners, fileSigners...)
 
 	// Combine all public key signers into ONE method
@@ -272,7 +299,7 @@ func executeRemote(info hostInfo, command string, flags execFlags) ExecResult {
 // buildAuthMethodsNonInteractive collects file-based key signers and returns them
 // along with a sudo password if available.
 // Priority for sudo password: saved sudo password > saved SSH password > interactive prompt.
-func buildAuthMethodsNonInteractive(hostName, user, identityFile string, needSudo bool) ([]ssh.Signer, string, bool) {
+func buildAuthMethodsNonInteractive(cred credentialTarget, identityFile string, needSudo bool) ([]ssh.Signer, string, bool) {
 	var fileSigners []ssh.Signer
 
 	// Try configured IdentityFile (skip passphrase-protected keys non-interactively)
@@ -302,25 +329,23 @@ func buildAuthMethodsNonInteractive(hostName, user, identityFile string, needSud
 		store := tryLoadPasswordStoreInteractive()
 		if store != nil {
 			// First try saved sudo password
-			if needSudo && store.HasSudoPassword(hostName) {
-				if pwd, err := store.GetSudoPassword(hostName); err == nil {
+			if needSudo {
+				if pwd, ok := lookupSudoPassword(store, cred.Keys); ok {
 					fmt.Fprintln(os.Stderr, "exec: using saved sudo password")
 					return fileSigners, pwd, !hasKeyAuth
 				}
 			}
 			// Then try saved SSH password
-			if store.Has(hostName) {
-				if pwd, err := store.Get(hostName); err == nil {
-					fmt.Fprintln(os.Stderr, "exec: using saved password")
-					return fileSigners, pwd, !hasKeyAuth
-				}
+			if pwd, ok := lookupSavedPassword(store, cred.Keys); ok {
+				fmt.Fprintln(os.Stderr, "exec: using saved password")
+				return fileSigners, pwd, !hasKeyAuth
 			}
 		}
 	}
 
 	// Key auth + sudo + no saved passwords → prompt for sudo password
 	if needSudo && hasKeyAuth {
-		if pwd := promptSudoPassword(hostName, user); pwd != "" {
+		if pwd := promptSudoPassword(cred); pwd != "" {
 			return fileSigners, pwd, false
 		}
 	}
@@ -331,12 +356,15 @@ func buildAuthMethodsNonInteractive(hostName, user, identityFile string, needSud
 // promptSudoPassword interactively prompts for a sudo password with option to save.
 // Uses stderr for prompts and term.ReadPassword to avoid corrupting stdout.
 // In non-interactive terminals, prints a hint and returns "".
-func promptSudoPassword(hostName, user string) string {
+// The password is saved under the addressed host key, matching
+// `config set-sudo-password <host>`.
+func promptSudoPassword(cred credentialTarget) string {
+	hostKey := cred.primaryKey()
 	if !isInteractive() {
-		fmt.Fprintf(os.Stderr, "sudo password required for %s@%s. Use `sshgo config set-sudo-password %s` to set one.\n", user, hostName, hostName)
+		fmt.Fprintf(os.Stderr, "sudo password required for %s@%s. Use `sshgo config set-sudo-password %s` to set one.\n", cred.User, cred.Host, hostKey)
 		return ""
 	}
-	fmt.Fprintf(os.Stderr, "sudo password for %s@%s (empty = NOPASSWD): ", user, hostName)
+	fmt.Fprintf(os.Stderr, "sudo password for %s@%s (empty = NOPASSWD): ", cred.User, cred.Host)
 	pwdBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Fprintln(os.Stderr)
 	if err != nil {
@@ -356,7 +384,7 @@ func promptSudoPassword(hostName, user string) string {
 		store, err := initPasswordStore()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to init password store: %v\n", err)
-		} else if err := store.SetSudoPassword(hostName, pwd); err != nil {
+		} else if err := store.SetSudoPassword(hostKey, pwd); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to save sudo password: %v\n", err)
 		} else {
 			fmt.Fprintln(os.Stderr, "sudo password saved")
