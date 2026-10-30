@@ -136,13 +136,9 @@ func findByAlias(lc *LocalConfig, alias string) (string, HostMeta, bool) {
 
 // hostInfoFromMeta projects stored metadata into the resolved Host view.
 func hostInfoFromMeta(name string, meta HostMeta) hostInfo {
-	source := sourceManual
-	if meta.Hostname != "" || meta.User != "" || meta.Port != "" || meta.IdentityFile != "" {
-		source = sourceImported
-	}
 	return hostInfo{
 		Name:         name,
-		Source:       source,
+		Source:       deriveSource(meta),
 		Hostname:     meta.Hostname,
 		Port:         meta.Port,
 		User:         meta.User,

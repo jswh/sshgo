@@ -33,6 +33,11 @@ type HostMeta struct {
 	Tags               []string `json:"tags,omitempty"`
 	ConnectionPriority []string `json:"connection_priority,omitempty"` // ordered auth method names
 
+	// Source records provenance (imported / direct / manual), not the last
+	// editor. Empty in files written before it was persisted; see
+	// deriveSource.
+	Source string `json:"source,omitempty"`
+
 	// SSH connection details (populated by `config import` or `config set`)
 	Hostname     string `json:"hostname,omitempty"`
 	Port         string `json:"port,omitempty"`

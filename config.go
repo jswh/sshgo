@@ -48,7 +48,27 @@ func LoadLocalConfig() (*LocalConfig, error) {
 		cfg.Hosts = make(map[string]HostMeta)
 	}
 
+	// Files written before Source was persisted get it derived here, so callers
+	// never see an empty provenance; the next Save writes it to disk.
+	for name, meta := range cfg.Hosts {
+		meta.Source = deriveSource(meta)
+		cfg.Hosts[name] = meta
+	}
+
 	return cfg, nil
+}
+
+// deriveSource reports the stored provenance, falling back to the historical
+// rule for entries written before the field existed: any connection detail set
+// means the entry came from an import.
+func deriveSource(meta HostMeta) string {
+	if meta.Source != "" {
+		return meta.Source
+	}
+	if meta.Hostname != "" || meta.User != "" || meta.Port != "" || meta.IdentityFile != "" {
+		return sourceImported
+	}
+	return sourceManual
 }
 
 func (c *LocalConfig) Save() error {
@@ -62,8 +82,12 @@ func (c *LocalConfig) Save() error {
 
 // ConfigSet sets a metadata field for a host.
 // Supported keys: alias, notes, tags, connection-priority.
+// Creating an entry here makes it manual; editing one keeps its provenance.
 func (c *LocalConfig) Set(host, key, value string) error {
-	meta := c.Hosts[host]
+	meta, existed := c.Hosts[host]
+	if !existed {
+		meta.Source = sourceManual
+	}
 
 	switch strings.ToLower(key) {
 	case "alias":
@@ -84,6 +108,8 @@ func (c *LocalConfig) Set(host, key, value string) error {
 		meta.IdentityFile = value
 	case "proxy-jump", "proxyjump":
 		meta.ProxyJump = value
+	case "source":
+		return fmt.Errorf("key %q is derived from where the host came from and cannot be set", key)
 	default:
 		return fmt.Errorf("unknown key %q; supported: alias, notes, tags, connection-priority, hostname, port, user, identity-file, proxy-jump", key)
 	}
@@ -121,6 +147,8 @@ func (c *LocalConfig) Get(host, key string) (string, error) {
 		return meta.IdentityFile, nil
 	case "proxy-jump", "proxyjump":
 		return meta.ProxyJump, nil
+	case "source":
+		return meta.Source, nil
 	case "":
 		// Print all
 		return c.formatMeta(meta), nil
@@ -195,6 +223,9 @@ func (c *LocalConfig) FindByTag(tag string) []string {
 
 func (c *LocalConfig) formatMeta(meta HostMeta) string {
 	var parts []string
+	if meta.Source != "" {
+		parts = append(parts, "source: "+meta.Source)
+	}
 	if meta.Alias != "" {
 		parts = append(parts, "alias: "+meta.Alias)
 	}
@@ -375,6 +406,7 @@ func handleConfigImport() {
 
 			// Preserve existing metadata (alias, notes, tags, priority)
 			meta := lc.Hosts[name]
+			meta.Source = sourceImported
 			meta.Hostname, _ = sshCfg.Get(name, "Hostname")
 			meta.Port, _ = sshCfg.Get(name, "Port")
 			meta.User, _ = sshCfg.Get(name, "User")
