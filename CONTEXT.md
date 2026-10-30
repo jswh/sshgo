@@ -25,7 +25,7 @@ A subcommand that displays connection details for a Host — Hostname, Port, Use
 _Avoid_: status, inspect, details
 
 **config** (subcommand):
-A subcommand to manage local Host metadata stored in `~/.sshgo_config`. Supports CRUD on per-host fields: Alias, Notes, Tags, Connection Priority, Hostname, Port, User, IdentityFile, ProxyJump. Also provides `config import` to take an Import Snapshot of `~/.ssh/config`, and `config remove <host>` to delete an entire entry (same as `config unset <host>`, no confirmation).
+A subcommand to manage local Host metadata stored in `~/.sshgo_config`. Supports CRUD on per-host fields: Alias, Notes, Tags, Connection Priority, Hostname, Port, User, IdentityFile, ProxyJump. Also provides `config import` to take an Import Snapshot of `~/.ssh/config`, `config remove <host>` to delete an entire entry (same as `config unset <host>`, no confirmation), and the two credential commands `config set-password <host>` and `config set-sudo-password <host>`, which share one interaction: two entries plus confirmation, stored encrypted in `~/.sshgo_passwords`.
 _Avoid_: manage, settings, metadata
 
 **Source**:
@@ -33,7 +33,7 @@ The provenance of a Host entry, persisted in `~/.sshgo_config`. One of: `importe
 _Avoid_: type, origin (use Source), last-modified-by
 
 **Local Metadata**:
-Per-Host information stored in `~/.sshgo_config`, independent of `~/.ssh/config` and the encrypted password store. Fields: Alias (quick-reference name), Notes (free text), Tags (categorical labels for filtering/grouping), Connection Priority (ordering of authentication methods), Hostname, Port, User, IdentityFile, ProxyJump (connection details imported from `~/.ssh/config` or set manually). ProxyJump is stored only and does not affect connections yet.
+Per-Host information stored in `~/.sshgo_config`, independent of `~/.ssh/config` and the encrypted password store. Fields: Alias (quick-reference name), Notes (free text), Tags (categorical labels for filtering/grouping), Connection Priority (ordering of authentication methods), Hostname, Port, User, IdentityFile, ProxyJump (connection details imported from `~/.ssh/config` or set manually). ProxyJump names a Jump Host and is honoured on every connection.
 
 **Alias**:
 A user-defined short name for a Host that can be used as a positional argument instead of the Host name or direct address.
@@ -46,6 +46,22 @@ _Avoid_: direct connection string, ad-hoc host
 **Resolution Error**:
 One of three typed failures produced by the single resolution entry point, each on stderr with exit code `1`: host not found (a bare name absent from local metadata), no connection details (an entry with no hostname), and IPv6 unsupported (more than one colon).
 _Avoid_: connection error, lookup failure
+
+**Jump Host**:
+The Host a connection passes through to reach another Host, named by the target's ProxyJump field. A Jump Host is an ordinary Host: it has its own Hostname, Port, User, IdentityFile, and saved password, resolved by the same addressing grammar as everything else (Host name, Alias, or Direct Address). `none` and an empty value mean a direct connection. The value must name an sshgo Host; ssh's `ssh://` URIs and comma-separated multi-hop syntax are rejected.
+_Avoid_: bastion (a role, not a concept), proxy, gateway
+
+**Jump Chain**:
+The resolved sequence of Jump Hosts from the outermost one to the target, in dial order. Depth is unlimited, and each hop authenticates as itself: credentials never cross hops, so a target's password or sudo password is never offered to a Jump Host. The chain is resolved at parse time and is never validated at write time, so a forward reference (target created before its Jump Host) is legal.
+_Avoid_: hop list, proxy chain, tunnel chain
+
+**hop**:
+One node of a Jump Chain: a single Host being dialled. The word exists so the chain can be discussed without saying "Host" when a specific node is meant. The SSH agent is the only thing shared across hops, because it belongs to the user rather than to any Host.
+_Avoid_: jump, leg, node
+
+**Chain Error**:
+One of the parse-time failures produced while resolving a Jump Chain, reported on stderr with exit code `1` and never after a dial: a missing Jump Host (named together with the target it belongs to), a Jump Host with no connection details, a loop (reported with the cycle path), or an unsupported jump spelling. A Jump Host that resolves but cannot be authenticated or reached is a Jump Error instead, prefixed with the hop so the two ends of a chain stay distinguishable. `info` reports Chain Errors without dialling.
+_Avoid_: jump error (that is the dial-time failure), resolution error (those are single-Host)
 
 **Auth Methods** (in info output):
 The authentication mechanisms available for a Host, described at a granular level but without exposing secrets. Example: `SSH Agent (3 keys), Password (saved)`. Never includes key paths, passwords, or passphrases.

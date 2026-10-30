@@ -1,5 +1,7 @@
 # Runtime independence from system SSH
 
+> **Status:** partially superseded. `ProxyJump` is now honoured, so the Consequences line below saying it is "stored but not honoured" describes the state at the time of this decision, not the current behaviour. See [ADR-0003](0003-proxyjump-as-a-chain-of-sshgo-hosts.md). The rest of this ADR stands unchanged; its body is left as written because an ADR records what was decided, not what is true today.
+
 sshgo never reads `~/.ssh/config` while running. The file is read exactly once, by `config import`, and from then on sshgo's behavior is defined solely by its own metadata in `~/.sshgo_config`.
 
 ## Context

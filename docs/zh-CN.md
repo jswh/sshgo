@@ -4,7 +4,7 @@
 
 **简单、安全、高效的 SSH 客户端**
 
-一个简洁的 SSH 客户端：导入一次系统 SSH 配置，之后 sshgo 拥有自己的主机清单，运行时只读自己的元数据。支持密钥认证、密码加密存储、结构化远程执行与连接详情查看。
+一个简洁的 SSH 客户端：导入一次系统 SSH 配置，之后 sshgo 拥有自己的主机清单，运行时只读自己的元数据。支持密钥认证、密码加密存储、结构化远程执行、连接详情查看与跳板机。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.20+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
@@ -28,6 +28,7 @@
 | 🚀 **直接登录** | 支持 `user@host:port` 格式直接连接 |
 | 📋 **交互式选择** | 无参数时列出所有主机供选择 |
 | 📦 **Exec（结构化执行）** | 远程命令执行，返回结构化 JSON 输出 |
+| 🔀 **跳板机** | 经一台或多台堡垒机到达主机（`proxy-jump`），每跳各自持有凭据 |
 | 🔍 **Info** | 查看主机的连接详情 |
 | 🏷️ **主机元数据** | 管理别名、备注、标签、连接优先级 |
 | 🔄 **自动更新** | 一条命令更新到最新版本（`update` 子命令） |
@@ -166,11 +167,13 @@ sshgo config set my-vm hostname 192.168.1.100
 sshgo config set my-vm user admin
 sshgo config set my-vm port 2222
 sshgo config set my-vm identity-file ~/.ssh/my_key
-sshgo config set my-vm proxy-jump bastion.example.com   # 只存不用，跳板连接尚未实现
+sshgo config set my-vm proxy-jump bastion               # bastion 是已存在的 Host
 ```
 
-`proxy-jump` 会被记录并保留，留给将来的跳板功能，但目前的连接不会经过它。
-导入带 `ProxyJump` 的主机时同样会给出提示。
+`proxy-jump` 指定一台**跳板机（Jump Host）**，连接会真的经过它。取值按与其他
+Host 参数完全相同的规则解析，所以 Host 名、Alias、直连地址都可以；`none` 或空值
+表示直连。链可以任意深度：如果 `bastion` 自己也有 `proxy-jump`，那一跳会先被拨通。
+成环的链在拨号之前就会被拒绝，并打印出环的路径。
 
 删除整条主机条目（无确认交互，可在脚本中使用）：
 
@@ -199,6 +202,13 @@ sshgo config find --tag prod
 sshgo config set-sudo-password db-staging
 ```
 
+配置 SSH 密码（同样的交互，同样的存储）。用于只认口令的主机——通常是脚本里要
+经过的堡垒机：
+
+```bash
+sshgo config set-password bastion
+```
+
 ### 自动更新
 
 检查最新 release 并更新当前二进制：
@@ -210,6 +220,36 @@ sshgo update
 update 子命令从 GitHub 获取最新版本，与构建时嵌入的版本号比较，
 发现新版本后自动下载并替换二进制。如果二进制在系统目录中，
 会自动 fallback 到 `sudo mv`。
+
+### 跳板机：经堡垒机到达内网主机
+
+给目标机设一个指向已存在 Host 的 `proxy-jump`：
+
+```bash
+sshgo config set bastion hostname 203.0.113.9     # 你要经过的那台
+sshgo config set bastion user ops
+sshgo config set db1 hostname 10.0.0.5            # 它背后的目标
+sshgo config set db1 proxy-jump bastion
+
+sshgo exec db1 "pg_isready"                       # 经 bastion 连接
+sshgo info db1                                    # 显示 Jump: bastion
+```
+
+每一跳都是一台普通 Host，有自己的用户、端口、IdentityFile 与存库口令。凭据**不跨跳
+共享**：`db1` 的口令与 sudo 口令绝不会发给 `bastion`，`bastion` 的口令也不会被复用到
+`db1`。唯一共享的是 SSH agent，因为它属于你，而不属于某台主机。
+
+链可以嵌套。如果 `inner` 只能从 `bastion` 到达：
+
+```bash
+sshgo config set inner proxy-jump bastion
+sshgo config set db1 proxy-jump inner
+sshgo info db1                                    # Jump: bastion -> inner
+```
+
+链在拨号之前就解析完毕，所以跳板不存在、跳板没有地址、或链成环都会立刻失败，
+并打印出路径。`exec` 在任何一跳都不会提示输入 SSH 口令：某一跳既无 key 又无存库
+口令时立刻失败并点名那一跳，出路是 `sshgo config set-password <跳板>`。
 
 ### 查看帮助
 
@@ -240,6 +280,8 @@ sshgo update --help
 ### exec 认证（非交互式）
 
 exec 子命令自动尝试 Agent → IdentityFile → 默认密钥 → 已保存密码，不会交互式提示输入密码。
+跳板链上的每一跳同样如此：某一跳既无 key 又无存库口令时立刻失败并点名那一跳，
+出路是 `sshgo config set-password <跳板>`。
 
 ### sudo 密码
 
@@ -263,32 +305,42 @@ Alias 与它指向的 Host 名是两个不同的键：为 `db-staging` 存的口
 `exec --sudo db-staging-alias` 时不会命中。如果寻址的名字没有对应条目，`exec`
 会回落到解析后的 Hostname，以兼容按地址存的旧条目。
 
+## ⚠️ 已知限制
+
+- **不校验主机密钥。** sshgo 在每一跳都用 `InsecureIgnoreHostKey()`。因此跳板链**不会**
+  让 sshgo 更安全：被攻陷的堡垒机可以冒充目标机。`known_hosts` 校验是另一个独立特性。
+- **不支持 ssh 的跳板语法。** `ssh://` URI 与逗号多跳写法（`bastion,inner`）会被拒绝。
+  请改为逐台 Host 设置 `proxy-jump`。
+- **跳板必须是 sshgo 管理的 Host 或直连地址。** sshgo 不认识的裸名不能当跳板，因为
+  运行时它从不读 `~/.ssh/config`。
+- **不支持 IPv6**，无论是主机地址还是跳板取值。
+
 ## 🗂️ 项目结构
 
 ```
 sshgo/
-├── main.go          # CLI 路由、遗留模式、认证、连接
-├── resolve.go       # 唯一的解析入口 + 类型化解析错误
-├── import.go        # config import：纯函数快照构建 + I/O 外壳
-├── exec.go          # 结构化远程命令执行（exec 子命令）
-├── info.go          # 连接信息展示（info 子命令）
-├── config.go        # 主机元数据管理（config 子命令）
-├── update.go        # 自动更新（update 子命令）
-├── version.go       # 内嵌版本号
-├── types.go         # 共享类型：ExecResult, InfoResult, HostMeta, LocalConfig
-├── password.go      # AES-GCM 加密密码存储
-├── install.sh       # 一键安装脚本 (Unix)
-├── install.ps1      # 一键安装脚本 (Windows)
-├── update_test.go   # update 子命令单元测试
-├── CONTEXT.md       # 领域术语表
+├── main.go              # os.Exit(cli.Run(...)) 与 -ldflags 注入的版本号
+├── internal/cli/        # 子命令分发、帮助文案、退出码、两套认证策略
+├── internal/host/       # Host 元数据、CRUD、出处、解析
+├── internal/credential/ # 加密口令库（AES-GCM + argon2id）
+├── internal/sshconfig/  # config import：纯函数快照构建 + ssh 配置适配器
+├── internal/connect/    # 唯一拨号点：Dial / Chain / 会话
+├── internal/update/     # 自更新，版本号由调用方传入
+├── internal/ui/         # 终端输入：选择、提示、终端判定
+├── install.sh           # 一键安装脚本 (Unix)
+├── install.ps1          # 一键安装脚本 (Windows)
+├── test/                # e2e：Dockerfile（sshd + sudoers）+ setup.sh
+├── CONTEXT.md           # 领域术语表
 ├── docs/
-│   └── adr/
-│       ├── 0001-separate-metadata-from-passwords.md
-│       └── 0002-runtime-independence-from-system-ssh.md
-├── go.mod           # Go 模块定义
-├── go.sum           # 依赖校验
-├── LICENSE          # MIT 许可证
-└── README.md        # 项目文档
+│   ├── adr/
+│   │   ├── 0001-separate-metadata-from-passwords.md
+│   │   ├── 0002-runtime-independence-from-system-ssh.md
+│   │   └── 0003-proxyjump-as-a-chain-of-sshgo-hosts.md
+│   └── zh-CN.md         # 简体中文文档
+├── go.mod               # Go 模块定义
+├── go.sum               # 依赖校验
+├── LICENSE              # MIT 许可证
+└── README.md            # 项目文档
 ```
 
 ## 🤝 贡献

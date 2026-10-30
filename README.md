@@ -4,7 +4,7 @@
 
 **Simple, Secure, and Efficient SSH Client**
 
-A lightweight SSH client that owns its host list: import your system SSH config once, then sshgo reads only its own metadata. Supports key authentication, encrypted password storage, structured remote execution, and connection inspection.
+A lightweight SSH client that owns its host list: import your system SSH config once, then sshgo reads only its own metadata. Supports key authentication, encrypted password storage, structured remote execution, connection inspection, and jump hosts.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.20+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
@@ -28,6 +28,7 @@ A lightweight SSH client that owns its host list: import your system SSH config 
 | 🚀 **Direct Login** | Supports `user@host:port` format for direct connections |
 | 📋 **Interactive Selection** | Lists all hosts for selection when run without arguments |
 | 📦 **Exec (Structured)** | Run remote commands with structured JSON output (`exec` subcommand) |
+| 🔀 **Jump Hosts** | Reach a Host through one or more bastions (`proxy-jump`), each with its own credentials |
 | 🔍 **Info** | Inspect connection details for any host (`info` subcommand) |
 | 🏷️ **Host Metadata** | Manage aliases, notes, tags, and connection priority per host (`config` subcommand) |
 | 🔄 **Auto-Update** | Update to the latest version with a single command (`update` subcommand) |
@@ -169,12 +170,14 @@ sshgo config set my-vm hostname 192.168.1.100
 sshgo config set my-vm user admin
 sshgo config set my-vm port 2222
 sshgo config set my-vm identity-file ~/.ssh/my_key
-sshgo config set my-vm proxy-jump bastion.example.com   # stored only, not used yet
+sshgo config set my-vm proxy-jump bastion               # bastion is an existing Host
 ```
 
-`proxy-jump` is recorded and preserved for a future jump-host feature, but connections
-never go through it today. Importing a host that has `ProxyJump` set prints a warning
-for the same reason.
+`proxy-jump` names a **Jump Host** and connections go through it. The value is resolved
+by the same rules as any other Host argument, so a Host name, an Alias, or a Direct
+Address all work; `none` or an empty value means a direct connection. Chains can be any
+depth: if `bastion` itself has a `proxy-jump`, that hop is dialled first. A chain that
+loops is refused before anything is dialled, and the cycle is printed.
 
 Remove a host entry entirely (no confirmation, safe in scripts):
 
@@ -203,6 +206,13 @@ Configure a sudo password (stored encrypted in `~/.sshgo_passwords`):
 sshgo config set-sudo-password db-staging
 ```
 
+Configure an SSH password (same interaction, same store). Use this for a Host that only
+accepts a password — typically a bastion you reach from a script:
+
+```bash
+sshgo config set-password bastion
+```
+
 ### Update: Auto-Update sshgo
 
 Check for the latest release and update the current binary:
@@ -215,6 +225,38 @@ The update subcommand fetches the latest release from GitHub, compares the versi
 tag with the embedded version (set at build time), and replaces the binary if a
 newer version is found. If the binary is in a system directory, it falls back to
 `sudo mv` automatically.
+
+### Jump Hosts: Reaching a Host Through a Bastion
+
+Give the target a `proxy-jump` pointing at an existing Host:
+
+```bash
+sshgo config set bastion hostname 203.0.113.9     # the Host you pass through
+sshgo config set bastion user ops
+sshgo config set db1 hostname 10.0.0.5            # the Host behind it
+sshgo config set db1 proxy-jump bastion
+
+sshgo exec db1 "pg_isready"                       # connects through bastion
+sshgo info db1                                    # shows Jump: bastion
+```
+
+Every hop is an ordinary Host with its own user, port, IdentityFile, and saved password.
+Credentials never cross hops: `db1`'s password and sudo password are never offered to
+`bastion`, and `bastion`'s password is never reused for `db1`. Only the SSH agent is
+shared, because it belongs to you rather than to a Host.
+
+Chains nest. If `inner` is reachable only from `bastion`:
+
+```bash
+sshgo config set inner proxy-jump bastion
+sshgo config set db1 proxy-jump inner
+sshgo info db1                                    # Jump: bastion -> inner
+```
+
+The chain is resolved before anything is dialled, so a missing Hop, a Hop with no
+address, or a loop fails immediately with the path spelled out. `exec` never prompts for
+SSH authentication on any hop: if a hop has no key and no saved password, it fails and
+names that hop. `sshgo config set-password <hop>` is how you fix it.
 
 ### Show Help
 
@@ -244,7 +286,7 @@ The program tries authentication in this order:
 
 ### exec Authentication (Non-Interactive)
 
-The `exec` subcommand automatically tries Agent → IdentityFile → Default Keys → Saved Passwords, without interactive password prompts. If none succeed, it returns a structured error.
+The `exec` subcommand automatically tries Agent → IdentityFile → Default Keys → Saved Passwords, without interactive password prompts. This holds for every hop of a jump chain too. A hop with no key and no saved password fails immediately and is named, with `sshgo config set-password <hop>` as the way out.
 
 ### Sudo Password
 
@@ -270,32 +312,44 @@ distinct keys: a password saved for `db-staging` is not used when you run
 `exec --sudo db-staging-alias`. If no entry matches the addressed name, `exec`
 falls back to the resolved Hostname so entries saved by address keep working.
 
+## ⚠️ Limitations
+
+- **Host keys are not verified.** sshgo uses `InsecureIgnoreHostKey()` on every hop. A
+  Jump Chain therefore does **not** make sshgo safer: a compromised bastion can
+  impersonate the target. `known_hosts` verification is a separate feature.
+- **ssh's jump syntax is not supported.** `ssh://` URIs and comma-separated multi-hop
+  values (`bastion,inner`) are rejected. Write the chain with `proxy-jump` per Host
+  instead.
+- **A Jump Host must be an sshgo Host or a Direct Address.** A name that sshgo does not
+  manage cannot be a hop, because sshgo never reads `~/.ssh/config` at runtime.
+- **IPv6 is not supported**, in a Host address or a jump value.
+
 ## 🗂️ Project Structure
 
 ```
 sshgo/
-├── main.go          # CLI routing, legacy mode, authentication, connection
-├── resolve.go       # Single resolution entry point + typed resolution errors
-├── import.go        # config import: pure snapshot builder + I/O shell
-├── exec.go          # Structured remote command execution (exec subcommand)
-├── info.go          # Connection information display (info subcommand)
-├── config.go        # Local host metadata management (config subcommand)
-├── update.go        # Auto-update (update subcommand)
-├── version.go       # Embedded version string
-├── types.go         # Shared types: ExecResult, InfoResult, HostMeta, LocalConfig
-├── password.go      # AES-GCM encrypted password store
-├── install.sh       # One-click install script (Unix)
-├── install.ps1      # One-click install script (Windows)
-├── update_test.go   # Unit tests for update subcommand
-├── CONTEXT.md       # Domain glossary
+├── main.go              # os.Exit(cli.Run(...)) plus the version injected by -ldflags
+├── internal/cli/        # subcommand dispatch, help text, exit codes, auth strategies
+├── internal/host/       # Host metadata, CRUD, provenance, resolution
+├── internal/credential/ # encrypted password store (AES-GCM + argon2id)
+├── internal/sshconfig/  # config import: pure snapshot builder + ssh config adapter
+├── internal/connect/    # the only dial point: Dial / Chain / sessions
+├── internal/update/     # self-update, version passed in by the caller
+├── internal/ui/         # terminal input: selection, prompts, terminal predicates
+├── install.sh           # One-click install script (Unix)
+├── install.ps1          # One-click install script (Windows)
+├── test/                # e2e: Dockerfile (sshd + sudoers) + setup.sh
+├── CONTEXT.md           # Domain glossary
 ├── docs/
-│   └── adr/
-│       ├── 0001-separate-metadata-from-passwords.md
-│       └── 0002-runtime-independence-from-system-ssh.md
-├── go.mod           # Go module definition
-├── go.sum           # Dependency checksums
-├── LICENSE          # MIT License
-└── README.md        # Documentation
+│   ├── adr/
+│   │   ├── 0001-separate-metadata-from-passwords.md
+│   │   ├── 0002-runtime-independence-from-system-ssh.md
+│   │   └── 0003-proxyjump-as-a-chain-of-sshgo-hosts.md
+│   └── zh-CN.md         # Simplified Chinese documentation
+├── go.mod               # Go module definition
+├── go.sum               # Dependency checksums
+├── LICENSE              # MIT License
+└── README.md            # Documentation
 ```
 
 ## 🤝 Contributing
