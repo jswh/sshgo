@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -349,6 +351,109 @@ func TestChainErrorText(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The jump chain is reported in both output shapes, and a single-hop Host is
+// byte-for-byte unchanged: no `Jump:` line, no `jump` field.
+func TestInfoReportsJumpChain(t *testing.T) {
+	setupTempHome(t)
+	seedHost(t, "db1", map[string]string{"hostname": "10.0.0.5", "proxy-jump": "inner"})
+	seedHost(t, "inner", map[string]string{"hostname": "10.0.0.2", "proxy-jump": "bastion"})
+	seedHost(t, "bastion", map[string]string{"hostname": "10.0.0.9", "user": "ops"})
+
+	t.Run("human readable", func(t *testing.T) {
+		code, stdout, stderr := run(t, "info", "db1")
+		if code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, stderr)
+		}
+		want := "  Jump:     bastion -> inner\n"
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout =\n%s\nwant it to contain %q", stdout, want)
+		}
+		// The Jump line sits between the connection details and Auth.
+		if strings.Index(stdout, "Jump:") > strings.Index(stdout, "Auth:") {
+			t.Error("the Jump line appears after Auth; it belongs with the connection details")
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		// Give the target an identity file and the hop none, so "top-level
+		// auth_methods describes the target" is observable.
+		keyPath := filepath.Join(setupTempHome(t), "target_key")
+		if err := os.WriteFile(keyPath, []byte("not a key"), 0600); err != nil {
+			t.Fatalf("write key file: %v", err)
+		}
+		seedHost(t, "db1", map[string]string{"hostname": "10.0.0.5", "proxy-jump": "inner", "identity-file": keyPath})
+		seedHost(t, "inner", map[string]string{"hostname": "10.0.0.2", "proxy-jump": "bastion"})
+		seedHost(t, "bastion", map[string]string{"hostname": "10.0.0.9", "user": "ops"})
+
+		code, stdout, _ := run(t, "info", "--json", "db1")
+		if code != 0 {
+			t.Fatalf("exit code = %d, want 0", code)
+		}
+
+		var result struct {
+			AuthMethods []string `json:"auth_methods"`
+			Jump        []struct {
+				Name        string   `json:"name"`
+				Hostname    string   `json:"hostname"`
+				Port        string   `json:"port"`
+				User        string   `json:"user"`
+				AuthMethods []string `json:"auth_methods"`
+			} `json:"jump"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+			t.Fatalf("info --json is not JSON: %v", err)
+		}
+
+		var names []string
+		for _, hop := range result.Jump {
+			names = append(names, hop.Name)
+		}
+		if want := []string{"bastion", "inner"}; !slices.Equal(names, want) {
+			t.Errorf("jump = %v, want %v (outermost first)", names, want)
+		}
+		if len(result.Jump) == 2 && result.Jump[0].User != "ops" {
+			t.Errorf("jump[0].user = %q, want the hop's own user", result.Jump[0].User)
+		}
+		if len(result.Jump) == 2 && result.Jump[1].Port != "22" {
+			t.Errorf("jump[1].port = %q, want the default port", result.Jump[1].Port)
+		}
+		// The top-level auth_methods still describes the target only.
+		if !slices.Contains(result.AuthMethods, "IdentityFile (key)") {
+			t.Errorf("target auth_methods = %v, want the target's identity file", result.AuthMethods)
+		}
+		for _, hop := range result.Jump {
+			if slices.Contains(hop.AuthMethods, "IdentityFile (key)") {
+				t.Errorf("hop %q auth_methods = %v, want the hop's own methods", hop.Name, hop.AuthMethods)
+			}
+		}
+	})
+
+	t.Run("single hop is unchanged", func(t *testing.T) {
+		seedHost(t, "plain", map[string]string{"hostname": "10.0.0.7"})
+
+		_, human, _ := run(t, "info", "plain")
+		if strings.Contains(human, "Jump") {
+			t.Errorf("stdout =\n%s\nwant no Jump line for a direct Host", human)
+		}
+
+		code, stdout, _ := run(t, "info", "--json", "plain")
+		if code != 0 {
+			t.Fatalf("exit code = %d, want 0", code)
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(stdout), &raw); err != nil {
+			t.Fatalf("info --json is not JSON: %v", err)
+		}
+		if _, ok := raw["jump"]; ok {
+			t.Error("the jump field appeared for a Host with no jump chain")
+		}
+		want := []string{"auth_methods", "hostname", "meta", "name", "port", "source", "user"}
+		if got := sortedKeys(raw); !slices.Equal(got, want) {
+			t.Errorf("info --json keys = %v, want %v", got, want)
+		}
+	})
 }
 
 // A jump host may be an Alias or a Direct Address: one addressing grammar for

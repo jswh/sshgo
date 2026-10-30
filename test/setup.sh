@@ -852,7 +852,12 @@ assert_contains "jump: info names the bastion" "$TEST_BASTION" "$OUTPUT"
 OUTPUT=$($SSHGO info --json $TEST_JUMP_TARGET 2>/dev/null || true)
 assert_contains "jump: info --json has a jump array" '"jump"' "$OUTPUT"
 assert_contains "jump: jump element names the bastion" "\"name\": \"$TEST_BASTION\"" "$OUTPUT"
+assert_contains "jump: jump element has auth_methods" '"auth_methods"' "$OUTPUT"
+assert_contains "jump: jump element has the hop hostname" "$BASTION_PORT" "$OUTPUT"
 echo "$OUTPUT" | python3 -m json.tool > /dev/null 2>&1 && pass "jump: info --json is valid JSON" || fail "jump: info --json is invalid JSON"
+
+# 2i-5b: the jump description never leaks a key path, password, or passphrase
+assert_not_contains "jump: no key path in the jump description" "/tmp/sshgo_test_ed25519" "$OUTPUT"
 
 # 2i-6: a single-hop host has no jump field at all
 OUTPUT=$($SSHGO info --json $TEST_HOST 2>/dev/null || true)
@@ -865,9 +870,14 @@ assert_contains "jump: broken chain names the jump host" 'Jump host \"ghost-bast
 assert_contains "jump: broken chain offers config import" "config import" "$OUTPUT"
 assert_contains "jump: broken chain exits 1" '"exit_code": 1' "$OUTPUT"
 
-# 2i-8: info refuses to describe a host it could not connect to
+# 2i-8: info refuses to describe a host it could not connect to, with the same
+# wording a connection would use
 OUTPUT=$($SSHGO info $TEST_JUMP_TARGET 2>&1 || true)
+assert_contains "jump: info errors on a broken chain" "Jump host \"ghost-bastion\"" "$OUTPUT"
 assert_contains "jump: info errors on a broken chain" "not found" "$OUTPUT"
+assert_not_contains "jump: info does not describe a broken chain as healthy" "Auth:" "$OUTPUT"
+$SSHGO info $TEST_JUMP_TARGET >/dev/null 2>&1
+assert_eq "jump: info exits 1 on a broken chain" 1 "$?"
 
 # 2i-9: a loop is a parse-time failure with the path spelled out
 $SSHGO config set $TEST_JUMP_TARGET proxy-jump $TEST_JUMP_TARGET >/dev/null 2>&1

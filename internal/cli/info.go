@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/crypto/ssh/agent"
 
+	"sshgo/internal/connect"
 	"sshgo/internal/credential"
 	"sshgo/internal/host"
 )
@@ -46,7 +47,16 @@ func (c *CLI) runInfo(args []string) int {
 		return c.resolveError(err)
 	}
 
-	result := buildInfoResult(target)
+	// Validate the chain without dialling: `info` describes whether the Host can
+	// be reached, so a broken or looping chain must fail here rather than be
+	// reported as a healthy Host. The wording is the connection wording, since
+	// the user is looking at the same problem.
+	hops, err := connect.ResolveChain(target, connect.Options{})
+	if err != nil {
+		return c.resolveError(err)
+	}
+
+	result := buildInfoResult(target, hops)
 
 	// Local metadata shown alongside the connection details: user-defined fields
 	// only, never the connection values already surfaced above.
@@ -63,7 +73,7 @@ func (c *CLI) runInfo(args []string) int {
 	return 0
 }
 
-func buildInfoResult(target host.Resolved) InfoResult {
+func buildInfoResult(target host.Resolved, hops []host.Resolved) InfoResult {
 	// Detect available auth methods (non-interactive, non-sensitive)
 	authMethods := detectAuthMethods(target.IdentityFile)
 
@@ -74,7 +84,28 @@ func buildInfoResult(target host.Resolved) InfoResult {
 		User:        target.User,
 		Source:      target.Source,
 		AuthMethods: authMethods,
+		Jump:        buildJumpHops(hops),
 	}
+}
+
+// buildJumpHops describes each hop the way the target is described: connection
+// details plus the auth methods available for that hop, with no secrets. It
+// returns nil for an empty chain so the JSON field stays absent.
+func buildJumpHops(hops []host.Resolved) []JumpHop {
+	if len(hops) == 0 {
+		return nil
+	}
+	result := make([]JumpHop, 0, len(hops))
+	for _, hop := range hops {
+		result = append(result, JumpHop{
+			Name:        hop.Name,
+			Hostname:    hop.Hostname,
+			Port:        hop.Port,
+			User:        hop.User,
+			AuthMethods: detectAuthMethods(hop.IdentityFile),
+		})
+	}
+	return result
 }
 
 // detectAuthMethods checks which auth methods are available without connecting.
@@ -127,6 +158,11 @@ func printInfoHuman(out interface{ Write([]byte) (int, error) }, result InfoResu
 	fmt.Fprintln(out, "  Port:    ", result.Port)
 	fmt.Fprintln(out, "  User:    ", result.User)
 	fmt.Fprintln(out, "  Source:  ", result.Source)
+	// The Jump line sits with the connection details, and only when a chain
+	// exists: a direct Host's output stays byte-for-byte what it was.
+	if len(result.Jump) > 0 {
+		fmt.Fprintln(out, "  Jump:    ", jumpPath(result.Jump))
+	}
 	fmt.Fprintln(out, "  Auth:")
 	for _, m := range result.AuthMethods {
 		fmt.Fprintln(out, "    -", m)
@@ -146,6 +182,15 @@ func printInfoHuman(out interface{ Write([]byte) (int, error) }, result InfoResu
 			fmt.Fprintln(out, "    Priority:", strings.Join(result.Meta.ConnectionPriority, ", "))
 		}
 	}
+}
+
+// jumpPath renders the chain as "outermost -> ... -> innermost".
+func jumpPath(hops []JumpHop) string {
+	names := make([]string, 0, len(hops))
+	for _, hop := range hops {
+		names = append(names, hop.Name)
+	}
+	return strings.Join(names, " -> ")
 }
 
 // stripConnectionFields returns a copy of HostMeta with only user-defined metadata fields.
