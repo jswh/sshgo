@@ -1,6 +1,10 @@
 package main
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"sshgo/internal/host"
+)
 
 // Subcommand identifiers for CLI routing.
 type Subcommand string
@@ -26,41 +30,15 @@ func (e ExecResult) JSON() string {
 	return string(b)
 }
 
-// HostMeta is the per-host metadata stored in ~/.sshgo_config.
-type HostMeta struct {
-	Alias              string   `json:"alias,omitempty"`
-	Notes              string   `json:"notes,omitempty"`
-	Tags               []string `json:"tags,omitempty"`
-	ConnectionPriority []string `json:"connection_priority,omitempty"` // ordered auth method names
-
-	// Source records provenance (imported / direct / manual), not the last
-	// editor. Empty in files written before it was persisted; see
-	// deriveSource.
-	Source string `json:"source,omitempty"`
-
-	// SSH connection details (populated by `config import` or `config set`)
-	Hostname     string `json:"hostname,omitempty"`
-	Port         string `json:"port,omitempty"`
-	User         string `json:"user,omitempty"`
-	IdentityFile string `json:"identity_file,omitempty"`
-	ProxyJump    string `json:"proxy_jump,omitempty"`
-}
-
-// LocalConfig represents the full ~/.sshgo_config file.
-type LocalConfig struct {
-	Version string              `json:"version"`
-	Hosts   map[string]HostMeta `json:"hosts"` // keyed by canonical host identifier
-}
-
 // InfoResult is the structured output for `sshgo info`.
 type InfoResult struct {
-	Name        string    `json:"name"`
-	Hostname    string    `json:"hostname"`
-	Port        string    `json:"port"`
-	User        string    `json:"user"`
-	Source      string    `json:"source"`
-	AuthMethods []string  `json:"auth_methods"` // non-sensitive descriptions
-	Meta        *HostMeta `json:"meta,omitempty"`
+	Name        string         `json:"name"`
+	Hostname    string         `json:"hostname"`
+	Port        string         `json:"port"`
+	User        string         `json:"user"`
+	Source      string         `json:"source"`
+	AuthMethods []string       `json:"auth_methods"` // non-sensitive descriptions
+	Meta        *host.HostMeta `json:"meta,omitempty"`
 }
 
 func (i InfoResult) JSON() string {

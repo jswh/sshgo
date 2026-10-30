@@ -1,4 +1,4 @@
-package main
+package host
 
 import "testing"
 
@@ -66,14 +66,14 @@ func TestRemoveMakesHostUnresolvable(t *testing.T) {
 	if err := cfg.Set("myvm", "hostname", "10.0.0.5"); err != nil {
 		t.Fatalf("set hostname: %v", err)
 	}
-	if _, err := resolveTarget("myvm"); err != nil {
-		t.Fatalf("resolveTarget(myvm) before remove: %v", err)
+	if _, err := Resolve("myvm"); err != nil {
+		t.Fatalf("Resolve(myvm) before remove: %v", err)
 	}
 
 	if err := cfg.Remove("myvm"); err != nil {
 		t.Fatalf("remove host: %v", err)
 	}
-	if _, err := resolveTarget("myvm"); err == nil {
-		t.Error("resolveTarget(myvm) still succeeded after the host was removed")
+	if _, err := Resolve("myvm"); err == nil {
+		t.Error("Resolve(myvm) still succeeded after the host was removed")
 	}
 }

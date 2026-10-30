@@ -13,6 +13,8 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/term"
+
+	"sshgo/internal/host"
 )
 
 // execFlags holds parsed flags for the exec subcommand.
@@ -50,7 +52,7 @@ func handleExec(args []string) {
 	hostName := args[0]
 	command := strings.Join(args[1:], " ")
 
-	target, err := resolveTarget(hostName)
+	target, err := host.Resolve(hostName)
 	if err != nil {
 		exitResolveError(err)
 	}
@@ -92,9 +94,7 @@ func parseExecFlags(args *[]string) execFlags {
 }
 
 // executeRemote dials the host, runs a command, and returns structured output.
-func executeRemote(target resolvedTarget, command string, flags execFlags) ExecResult {
-	hostname, port, user, identityFile := resolveConnection(target.Info)
-
+func executeRemote(target host.Resolved, command string, flags execFlags) ExecResult {
 	// 1. Collect all key signers (agent + file) for a single publickey method
 	var allSigners []ssh.Signer
 	var agentConn net.Conn
@@ -108,7 +108,7 @@ func executeRemote(target resolvedTarget, command string, flags execFlags) ExecR
 	}
 
 	// 2. Build non-agent auth methods (file signers + sudo password)
-	fileSigners, passwordForSudo, hasPassword := buildAuthMethodsNonInteractive(target.Cred, identityFile, flags.Sudo)
+	fileSigners, passwordForSudo, hasPassword := buildAuthMethodsNonInteractive(target, flags.Sudo)
 	allSigners = append(allSigners, fileSigners...)
 
 	// Combine all public key signers into ONE method
@@ -132,13 +132,13 @@ func executeRemote(target resolvedTarget, command string, flags execFlags) ExecR
 	}
 
 	clientConfig := &ssh.ClientConfig{
-		User:            user,
+		User:            target.User,
 		Auth:            methods,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         30 * time.Second,
 	}
 
-	client, err := ssh.Dial("tcp", hostname+":"+port, clientConfig)
+	client, err := ssh.Dial("tcp", target.Hostname+":"+target.Port, clientConfig)
 	if agentConn != nil {
 		agentConn.Close()
 	}
@@ -197,12 +197,13 @@ func executeRemote(target resolvedTarget, command string, flags execFlags) ExecR
 // buildAuthMethodsNonInteractive collects file-based key signers and returns them
 // along with a sudo password if available.
 // Priority for sudo password: saved sudo password > saved SSH password > interactive prompt.
-func buildAuthMethodsNonInteractive(cred credentialTarget, identityFile string, needSudo bool) ([]ssh.Signer, string, bool) {
+func buildAuthMethodsNonInteractive(target host.Resolved, needSudo bool) ([]ssh.Signer, string, bool) {
 	var fileSigners []ssh.Signer
+	identityFile := target.IdentityFile
 
 	// Try configured IdentityFile (skip passphrase-protected keys non-interactively)
 	if identityFile != "" {
-		identityFile = expandPath(identityFile)
+		identityFile = host.ExpandPath(identityFile)
 		if signer := tryLoadKey(identityFile); signer != nil {
 			fileSigners = append(fileSigners, signer)
 			fmt.Fprintln(os.Stderr, "exec: using identity file")
@@ -228,13 +229,13 @@ func buildAuthMethodsNonInteractive(cred credentialTarget, identityFile string, 
 		if store != nil {
 			// First try saved sudo password
 			if needSudo {
-				if pwd, ok := lookupSudoPassword(store, cred.Keys); ok {
+				if pwd, ok := lookupSudoPassword(store, target.CredKeys); ok {
 					fmt.Fprintln(os.Stderr, "exec: using saved sudo password")
 					return fileSigners, pwd, !hasKeyAuth
 				}
 			}
 			// Then try saved SSH password
-			if pwd, ok := lookupSavedPassword(store, cred.Keys); ok {
+			if pwd, ok := lookupSavedPassword(store, target.CredKeys); ok {
 				fmt.Fprintln(os.Stderr, "exec: using saved password")
 				return fileSigners, pwd, !hasKeyAuth
 			}
@@ -243,7 +244,7 @@ func buildAuthMethodsNonInteractive(cred credentialTarget, identityFile string, 
 
 	// Key auth + sudo + no saved passwords → prompt for sudo password
 	if needSudo && hasKeyAuth {
-		if pwd := promptSudoPassword(cred); pwd != "" {
+		if pwd := promptSudoPassword(target); pwd != "" {
 			return fileSigners, pwd, false
 		}
 	}
@@ -256,13 +257,13 @@ func buildAuthMethodsNonInteractive(cred credentialTarget, identityFile string, 
 // In non-interactive terminals, prints a hint and returns "".
 // The password is saved under the addressed host key, matching
 // `config set-sudo-password <host>`.
-func promptSudoPassword(cred credentialTarget) string {
-	hostKey := cred.Keys[0]
+func promptSudoPassword(target host.Resolved) string {
+	hostKey := target.CredKeys[0]
 	if !isInteractive() {
-		fmt.Fprintf(os.Stderr, "sudo password required for %s@%s. Use `sshgo config set-sudo-password %s` to set one.\n", cred.User, cred.Host, hostKey)
+		fmt.Fprintf(os.Stderr, "sudo password required for %s@%s. Use `sshgo config set-sudo-password %s` to set one.\n", target.User, target.Hostname, hostKey)
 		return ""
 	}
-	fmt.Fprintf(os.Stderr, "sudo password for %s@%s (empty = NOPASSWD): ", cred.User, cred.Host)
+	fmt.Fprintf(os.Stderr, "sudo password for %s@%s (empty = NOPASSWD): ", target.User, target.Hostname)
 	pwdBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Fprintln(os.Stderr)
 	if err != nil {

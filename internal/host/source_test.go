@@ -1,4 +1,4 @@
-package main
+package host
 
 import (
 	"os"
@@ -23,8 +23,8 @@ func TestSourceSetCreatesManualEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload config: %v", err)
 	}
-	if got := reloaded.Hosts["myvm"].Source; got != sourceManual {
-		t.Errorf("Source = %q, want %q", got, sourceManual)
+	if got := reloaded.Hosts["myvm"].Source; got != SourceManual {
+		t.Errorf("Source = %q, want %q", got, SourceManual)
 	}
 }
 
@@ -37,7 +37,7 @@ func TestSourceSurvivesEdits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load local config: %v", err)
 	}
-	cfg.Hosts["db1"] = HostMeta{Hostname: "10.0.0.5", Source: sourceImported}
+	cfg.Hosts["db1"] = HostMeta{Hostname: "10.0.0.5", Source: SourceImported}
 	if err := cfg.Save(); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
@@ -58,8 +58,8 @@ func TestSourceSurvivesEdits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload config: %v", err)
 	}
-	if got := reloaded.Hosts["db1"].Source; got != sourceImported {
-		t.Errorf("Source = %q after edits, want %q", got, sourceImported)
+	if got := reloaded.Hosts["db1"].Source; got != SourceImported {
+		t.Errorf("Source = %q after edits, want %q", got, SourceImported)
 	}
 }
 
@@ -85,11 +85,11 @@ func TestSourceDerivedForLegacyFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load legacy config: %v", err)
 	}
-	if got := cfg.Hosts["legacy-imported"].Source; got != sourceImported {
-		t.Errorf("legacy-imported Source = %q, want %q", got, sourceImported)
+	if got := cfg.Hosts["legacy-imported"].Source; got != SourceImported {
+		t.Errorf("legacy-imported Source = %q, want %q", got, SourceImported)
 	}
-	if got := cfg.Hosts["legacy-manual"].Source; got != sourceManual {
-		t.Errorf("legacy-manual Source = %q, want %q", got, sourceManual)
+	if got := cfg.Hosts["legacy-manual"].Source; got != SourceManual {
+		t.Errorf("legacy-manual Source = %q, want %q", got, SourceManual)
 	}
 
 	// A save persists the derived values.
@@ -101,8 +101,8 @@ func TestSourceDerivedForLegacyFiles(t *testing.T) {
 		t.Fatalf("reload config: %v", err)
 	}
 	for name, want := range map[string]string{
-		"legacy-imported": sourceImported,
-		"legacy-manual":   sourceManual,
+		"legacy-imported": SourceImported,
+		"legacy-manual":   SourceManual,
 	} {
 		if got := reloaded.Hosts[name].Source; got != want {
 			t.Errorf("%s Source after save = %q, want %q", name, got, want)
@@ -127,16 +127,11 @@ func TestSourceReportedThroughAlias(t *testing.T) {
 		}
 	}
 
-	target, err := resolveTarget("vm")
+	target, err := Resolve("vm")
 	if err != nil {
-		t.Fatalf("resolveTarget(vm) failed: %v", err)
+		t.Fatalf("Resolve(vm) failed: %v", err)
 	}
-	if got := target.Info.Source; got != sourceManual {
-		t.Errorf("Source = %q, want %q", got, sourceManual)
-	}
-
-	result := buildInfoResult(target)
-	if result.Source != sourceManual {
-		t.Errorf("info Source = %q, want %q", result.Source, sourceManual)
+	if got := target.Source; got != SourceManual {
+		t.Errorf("Source = %q, want %q", got, SourceManual)
 	}
 }

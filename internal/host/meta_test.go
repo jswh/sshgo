@@ -1,4 +1,4 @@
-package main
+package host
 
 import (
 	"os"
@@ -113,7 +113,7 @@ func TestLocalConfigSaveUsesStablePath(t *testing.T) {
 		t.Fatalf("set notes: %v", err)
 	}
 
-	path := getLocalConfigPath()
+	path := LocalConfigPath()
 	if want := home + string(os.PathSeparator) + ".sshgo_config"; path != want {
 		t.Errorf("config path = %q, want %q", path, want)
 	}

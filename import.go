@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/kevinburke/ssh_config"
+
+	"sshgo/internal/host"
 )
 
 // skippedPattern records a Host pattern that import refused to store, and why.
@@ -21,7 +23,7 @@ type skippedPattern struct {
 // ~/.ssh/config.
 type importResult struct {
 	Imported int
-	Hosts    map[string]HostMeta
+	Hosts    map[string]host.HostMeta
 	Skipped  []skippedPattern
 	Warnings []string
 }
@@ -41,8 +43,8 @@ type sshConfigSource interface {
 // Import is a snapshot, not a sync: connection details are refreshed from the
 // config, user-owned fields (alias, notes, tags, priority) are preserved, and
 // entries deleted from ~/.ssh/config are never removed from sshgo.
-func buildImportSnapshot(src sshConfigSource, existing map[string]HostMeta) importResult {
-	result := importResult{Hosts: make(map[string]HostMeta, len(existing))}
+func buildImportSnapshot(src sshConfigSource, existing map[string]host.HostMeta) importResult {
+	result := importResult{Hosts: make(map[string]host.HostMeta, len(existing))}
 	for name, meta := range existing {
 		result.Hosts[name] = meta
 	}
@@ -60,7 +62,7 @@ func buildImportSnapshot(src sshConfigSource, existing map[string]HostMeta) impo
 		}
 
 		meta := result.Hosts[name]
-		meta.Source = sourceImported
+		meta.Source = host.SourceImported
 		meta.Hostname, _ = src.Get(name, "Hostname")
 		meta.Port, _ = src.Get(name, "Port")
 		meta.User, _ = src.Get(name, "User")
@@ -109,8 +111,8 @@ func (a sshConfigAdapter) Get(name, key string) (string, error) {
 
 func (a sshConfigAdapter) Names() []string {
 	var names []string
-	for _, host := range a.cfg.Hosts {
-		for _, pattern := range host.Patterns {
+	for _, h := range a.cfg.Hosts {
+		for _, pattern := range h.Patterns {
 			names = append(names, strings.TrimSpace(pattern.String()))
 		}
 	}
@@ -126,7 +128,7 @@ func handleConfigImport() {
 		os.Exit(1)
 	}
 
-	lc, err := LoadLocalConfig()
+	lc, err := host.LoadLocalConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

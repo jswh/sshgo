@@ -12,18 +12,9 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/term"
 
+	"sshgo/internal/host"
 	"sshgo/internal/ui"
 )
-
-type hostInfo struct {
-	Name         string
-	Source       string
-	HasPassword  bool
-	Hostname     string
-	Port         string
-	User         string
-	IdentityFile string
-}
 
 func main() {
 	args := os.Args[1:]
@@ -56,7 +47,7 @@ func main() {
 			command = strings.Join(args[1:], " ")
 		}
 
-		target, err := resolveTarget(args[0])
+		target, err := host.Resolve(args[0])
 		if err != nil {
 			exitResolveError(err)
 		}
@@ -112,11 +103,7 @@ func interactiveSelect() {
 
 	var items []string
 	for i, h := range hosts {
-		status := ""
-		if h.HasPassword {
-			status = " [saved]"
-		}
-		items = append(items, fmt.Sprintf("%2d. %-20s %-8s%s", i+1, h.Name, h.Source, status))
+		items = append(items, fmt.Sprintf("%2d. %-20s %-8s", i+1, h.Name, h.Source))
 	}
 
 	idx, _, err := ui.Select("Select host to connect", items)
@@ -125,8 +112,7 @@ func interactiveSelect() {
 		os.Exit(1)
 	}
 
-	info := hosts[idx]
-	target, err := resolveTarget(info.Name)
+	target, err := host.Resolve(hosts[idx].Name)
 	if err != nil {
 		exitResolveError(err)
 	}
@@ -165,25 +151,29 @@ func initPasswordStore() (*PasswordStore, error) {
 	return LoadPasswordStore(masterPwd)
 }
 
-func buildHostList() []hostInfo {
-	var result []hostInfo
+// hostEntry is one row of the interactive host list.
+type hostEntry struct {
+	Name   string
+	Source string
+}
 
-	lc, err := LoadLocalConfig()
+func buildHostList() []hostEntry {
+	var result []hostEntry
+
+	lc, err := host.LoadLocalConfig()
 	if err != nil {
 		return result
 	}
 
 	for name, meta := range lc.Hosts {
-		result = append(result, hostInfoFromMeta(name, meta))
+		result = append(result, hostEntry{Name: name, Source: meta.Source})
 	}
 
 	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
 	return result
 }
 
-func connectToHost(target resolvedTarget, command string) {
-	hostname, port, user, identityFile := resolveConnection(target.Info)
-
+func connectToHost(target host.Resolved, command string) {
 	// 1. Collect all key signers (agent + file) for a single publickey method
 	var allSigners []ssh.Signer
 	var agentConn net.Conn
@@ -197,7 +187,7 @@ func connectToHost(target resolvedTarget, command string) {
 	}
 
 	// 2. Build non-agent auth methods (file signers + passwords)
-	fileSigners, extraMethods, err := buildAuthMethods(target.Cred, identityFile)
+	fileSigners, extraMethods, err := buildAuthMethods(target, target.IdentityFile)
 	if err != nil {
 		if agentConn != nil {
 			agentConn.Close()
@@ -215,12 +205,12 @@ func connectToHost(target resolvedTarget, command string) {
 	methods = append(methods, extraMethods...)
 
 	clientConfig := &ssh.ClientConfig{
-		User:            user,
+		User:            target.User,
 		Auth:            methods,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
-	client, err := ssh.Dial("tcp", hostname+":"+port, clientConfig)
+	client, err := ssh.Dial("tcp", target.Hostname+":"+target.Port, clientConfig)
 	if agentConn != nil {
 		agentConn.Close() // safe to close after auth completes
 	}
@@ -288,13 +278,13 @@ func connectToHost(target resolvedTarget, command string) {
 // buildAuthMethods collects file-based key signers plus password methods for an
 // interactive login. Passwords are looked up and saved by Credential Key, so an
 // entry saved for the addressed name is found here as well as by `exec`.
-func buildAuthMethods(cred credentialTarget, identityFile string) ([]ssh.Signer, []ssh.AuthMethod, error) {
+func buildAuthMethods(target host.Resolved, identityFile string) ([]ssh.Signer, []ssh.AuthMethod, error) {
 	var fileSigners []ssh.Signer
 	var extraMethods []ssh.AuthMethod
 
 	// 1. Try configured IdentityFile
 	if identityFile != "" {
-		identityFile = expandPath(identityFile)
+		identityFile = host.ExpandPath(identityFile)
 		if signer, err := loadPrivateKey(identityFile); err == nil {
 			fileSigners = append(fileSigners, signer)
 			fmt.Fprintf(os.Stderr, "Using key: %s\n", identityFile)
@@ -315,7 +305,7 @@ func buildAuthMethods(cred credentialTarget, identityFile string) ([]ssh.Signer,
 	// 3. Check saved passwords. The store is loaded here rather than passed in
 	// because loading may prompt for the master password, which should only
 	// happen when key auth is not enough.
-	if savedPwd, ok := lookupSavedPassword(loadSavedPasswords(), cred.Keys); ok {
+	if savedPwd, ok := lookupSavedPassword(loadSavedPasswords(), target.CredKeys); ok {
 		extraMethods = append(extraMethods, ssh.Password(savedPwd))
 		fmt.Fprintln(os.Stderr, "Using saved password")
 		return fileSigners, extraMethods, nil
@@ -327,7 +317,7 @@ func buildAuthMethods(cred credentialTarget, identityFile string) ([]ssh.Signer,
 	}
 
 	// 5. Prompt for password
-	password, err := ui.Password(fmt.Sprintf("Enter password for %s@%s", cred.User, cred.Host))
+	password, err := ui.Password(fmt.Sprintf("Enter password for %s@%s", target.User, target.Hostname))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to enter password: %w", err)
 	}
@@ -339,7 +329,7 @@ func buildAuthMethods(cred credentialTarget, identityFile string) ([]ssh.Signer,
 		store, err := initPasswordStore()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to initialize password store: %v\n", err)
-		} else if err := store.Set(cred.Keys[0], password); err != nil {
+		} else if err := store.Set(target.CredKeys[0], password); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to save password: %v\n", err)
 		} else {
 			fmt.Fprintln(os.Stderr, "Password saved")
@@ -384,12 +374,4 @@ func loadSavedPasswords() *PasswordStore {
 		return &PasswordStore{Passwords: make(map[string]string)}
 	}
 	return store
-}
-
-func expandPath(path string) string {
-	if strings.HasPrefix(path, "~") {
-		homeDir, _ := os.UserHomeDir()
-		return filepath.Join(homeDir, path[1:])
-	}
-	return path
 }

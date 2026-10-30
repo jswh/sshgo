@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/kevinburke/ssh_config"
+
+	"sshgo/internal/host"
 )
 
 // fakeSSHConfig stands in for a parsed ~/.ssh/config so import semantics can be
@@ -93,8 +95,8 @@ func TestImportRecordsSourceImported(t *testing.T) {
 	if !ok {
 		t.Fatal("concrete host prod was not imported")
 	}
-	if meta.Source != sourceImported {
-		t.Errorf("Source = %q, want %q", meta.Source, sourceImported)
+	if meta.Source != host.SourceImported {
+		t.Errorf("Source = %q, want %q", meta.Source, host.SourceImported)
 	}
 	if meta.Hostname != "10.0.0.5" || meta.User != "deploy" || meta.Port != "2222" {
 		t.Errorf("imported metadata = %+v, want hostname 10.0.0.5 user deploy port 2222", meta)
@@ -129,16 +131,16 @@ func TestImportWarnsAboutProxyJump(t *testing.T) {
 // Import is a snapshot: re-running refreshes connection details, keeps
 // user-owned metadata, and never deletes entries the config no longer has.
 func TestImportIsSnapshotNotSync(t *testing.T) {
-	existing := map[string]HostMeta{
+	existing := map[string]host.HostMeta{
 		"prod": {
-			Source:   sourceImported,
+			Source:   host.SourceImported,
 			Alias:    "db-prod",
 			Notes:    "primary",
 			Tags:     []string{"prod"},
 			Hostname: "10.0.0.5",
 			User:     "old",
 		},
-		"gone": {Source: sourceImported, Hostname: "10.0.0.99"},
+		"gone": {Source: host.SourceImported, Hostname: "10.0.0.99"},
 	}
 
 	src := newFakeSSHConfig().

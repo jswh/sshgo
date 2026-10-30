@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"golang.org/x/crypto/ssh/agent"
+
+	"sshgo/internal/host"
 )
 
 func handleInfo(args []string) {
@@ -38,7 +40,7 @@ func handleInfo(args []string) {
 
 	hostName := filtered[0]
 
-	target, err := resolveTarget(hostName)
+	target, err := host.Resolve(hostName)
 	if err != nil {
 		exitResolveError(err)
 	}
@@ -47,7 +49,7 @@ func handleInfo(args []string) {
 
 	// Local metadata shown alongside the connection details: user-defined fields
 	// only, never the connection values already surfaced above.
-	if target.Info.Source != sourceDirect {
+	if target.Source != host.SourceDirect {
 		userMeta := stripConnectionFields(target.Meta)
 		result.Meta = &userMeta
 	}
@@ -59,26 +61,23 @@ func handleInfo(args []string) {
 	}
 }
 
-func buildInfoResult(target resolvedTarget) InfoResult {
-	info := target.Info
-	hostname, port, user, identityFile := resolveConnection(info)
-
+func buildInfoResult(target host.Resolved) InfoResult {
 	// Detect available auth methods (non-interactive, non-sensitive)
-	authMethods := detectAuthMethods(hostname, user, identityFile)
+	authMethods := detectAuthMethods(target.IdentityFile)
 
 	return InfoResult{
-		Name:        info.Name,
-		Hostname:    hostname,
-		Port:        port,
-		User:        user,
-		Source:      info.Source,
+		Name:        target.Name,
+		Hostname:    target.Hostname,
+		Port:        target.Port,
+		User:        target.User,
+		Source:      target.Source,
 		AuthMethods: authMethods,
 	}
 }
 
 // detectAuthMethods checks which auth methods are available without connecting.
 // Returns human-readable descriptions without exposing secrets.
-func detectAuthMethods(hostName, user, identityFile string) []string {
+func detectAuthMethods(identityFile string) []string {
 	var methods []string
 
 	// Check SSH agent
@@ -94,7 +93,7 @@ func detectAuthMethods(hostName, user, identityFile string) []string {
 
 	// Check identity file exists
 	if identityFile != "" {
-		identityFile = expandPath(identityFile)
+		identityFile = host.ExpandPath(identityFile)
 		if _, err := os.Stat(identityFile); err == nil {
 			methods = append(methods, "IdentityFile (key)")
 		}
@@ -150,8 +149,8 @@ func printInfoHuman(result InfoResult) {
 // stripConnectionFields returns a copy of HostMeta with only user-defined metadata fields.
 // Connection details (hostname, port, user, identity-file, proxy-jump) are excluded
 // since they are already shown as top-level fields in InfoResult.
-func stripConnectionFields(meta HostMeta) HostMeta {
-	return HostMeta{
+func stripConnectionFields(meta host.HostMeta) host.HostMeta {
+	return host.HostMeta{
 		Alias:              meta.Alias,
 		Notes:              meta.Notes,
 		Tags:               meta.Tags,
