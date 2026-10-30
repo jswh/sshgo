@@ -5,9 +5,11 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
@@ -32,6 +34,9 @@ type testServer struct {
 	ptySizes chan ptySize
 	stdin    chan string
 	closed   chan struct{}
+	// active counts live TCP connections, so a test can prove a chain released
+	// everything it opened.
+	active atomic.Int32
 }
 
 // startTestServer serves the "session" channel only: pty-req, exec, shell.
@@ -74,7 +79,11 @@ func startTestServer(t *testing.T) *testServer {
 			if err != nil {
 				return
 			}
-			go srv.handle(nc, cfg)
+			srv.active.Add(1)
+			go func() {
+				defer srv.active.Add(-1)
+				srv.handle(nc, cfg)
+			}()
 		}
 	}()
 
@@ -95,15 +104,20 @@ func (s *testServer) handle(nc net.Conn, cfg *ssh.ServerConfig) {
 	go ssh.DiscardRequests(reqs)
 
 	for newCh := range chans {
-		if newCh.ChannelType() != "session" {
-			newCh.Reject(ssh.UnknownChannelType, "only session")
-			continue
+		switch newCh.ChannelType() {
+		case "session":
+			ch, chReqs, err := newCh.Accept()
+			if err != nil {
+				continue
+			}
+			go s.serveSession(ch, chReqs)
+		case "direct-tcpip":
+			// Serving this channel is what makes the in-process server a
+			// working jump host: it dials the requested address for the client.
+			go serveDirectTCPIP(newCh)
+		default:
+			newCh.Reject(ssh.UnknownChannelType, "only session and direct-tcpip")
 		}
-		ch, chReqs, err := newCh.Accept()
-		if err != nil {
-			continue
-		}
-		go s.serveSession(ch, chReqs)
 	}
 }
 
@@ -443,3 +457,47 @@ func TestNewSessionErrorIsWrapped(t *testing.T) {
 func isNoAuthMethod(err error) bool { return errors.Is(err, ErrNoAuthMethod) }
 
 func asError(err error, target any) bool { return errors.As(err, target) }
+
+// directTCPIPMsg is the payload of a direct-tcpip channel open request. Field
+// order matters: ssh.Unmarshal decodes positionally.
+type directTCPIPMsg struct {
+	Raddr string
+	Rport uint32
+	Laddr string
+	Lport uint32
+}
+
+// serveDirectTCPIP dials the address a direct-tcpip channel asks for and joins
+// the two byte streams. It is the server side of the tunnel a jump host
+// provides, which is what lets the in-process server stand in for one.
+func serveDirectTCPIP(newCh ssh.NewChannel) {
+	var msg directTCPIPMsg
+	if err := ssh.Unmarshal(newCh.ExtraData(), &msg); err != nil {
+		newCh.Reject(ssh.Prohibited, "bad direct-tcpip payload")
+		return
+	}
+
+	target, err := net.Dial("tcp", net.JoinHostPort(msg.Raddr, strconv.Itoa(int(msg.Rport))))
+	if err != nil {
+		newCh.Reject(ssh.ConnectionFailed, err.Error())
+		return
+	}
+
+	ch, reqs, err := newCh.Accept()
+	if err != nil {
+		target.Close()
+		return
+	}
+	go ssh.DiscardRequests(reqs)
+
+	done := make(chan struct{}, 2)
+	pipe := func(dst, src io.ReadWriteCloser) {
+		_, _ = io.Copy(dst, src)
+		done <- struct{}{}
+	}
+	go pipe(ch, target)
+	go pipe(target, ch)
+	<-done
+	ch.Close()
+	target.Close()
+}

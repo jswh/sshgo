@@ -75,6 +75,9 @@ fi
 # Save a copy of the original binary for tests that should not replace it
 ORIG_BIN="$(mktemp -t sshgo-orig-XXXXX)"
 cp "$SSHGO" "$ORIG_BIN"
+# mktemp creates 0600 and cp keeps the destination mode, so a copied binary is
+# not executable until it is made so.
+chmod +x "$ORIG_BIN"
 echo ""
 
 # ------------------------------------------------------------------
@@ -180,6 +183,7 @@ echo "  --- Dev Build Update ---"
 
 DEV_BIN="$(mktemp -t sshgo-dev-XXXXX)"
 cp "$ORIG_BIN" "$DEV_BIN"
+chmod +x "$DEV_BIN"
 
 OUTPUT=$(SSHGO_UPDATE_SERVER="$MOCK_URL" "$DEV_BIN" update 2>&1 || true)
 assert_contains "update (dev): detects dev build" "Development build detected" "$OUTPUT"
@@ -294,6 +298,7 @@ MOCK_URL2="http://127.0.0.1:${MOCK_PORT2}"
 # Use a fresh copy of the original binary
 TRAIL_BIN="$(mktemp -t sshgo-trail-XXXXX)"
 cp "$ORIG_BIN" "$TRAIL_BIN"
+chmod +x "$TRAIL_BIN"
 OUTPUT=$(SSHGO_UPDATE_SERVER="$MOCK_URL2" "$TRAIL_BIN" update 2>&1 || true)
 assert_contains "update: trailing slash redirect" "v0.0.2" "$OUTPUT"
 
@@ -407,6 +412,91 @@ CONFEOF
 # Import hosts from SSH config into local config (import-based architecture)
 echo "  Importing hosts into local config..."
 $SSHGO config import 2>&1 | sed 's/^/  /'
+
+# ------------------------------------------------------------------
+# Jump-chain environment: a bastion plus a target that only the bastion can
+# reach. The target sits on an internal network and accepts root only from the
+# bastion's address, so "reachable through the jump host" is proven by the
+# topology rather than by the configuration.
+# ------------------------------------------------------------------
+JUMP_NET_NAME="sshgo-jump-net"
+JUMP_NET_SUBNET="172.31.99.0/24"
+BASTION_OUT_NET="sshgo-bastion-net"
+BASTION_NAME="sshgo-test-bastion"
+BASTION_IP="172.31.99.3"
+BASTION_PORT="2223"
+TARGET_NAME="sshgo-test-target"
+TARGET_IP="172.31.99.2"
+TEST_JUMP_TARGET="jump-target"
+TEST_BASTION="jump-bastion"
+
+echo "  Building jump-chain test environment..."
+docker rm -f "$BASTION_NAME" "$TARGET_NAME" 2>/dev/null || true
+docker network rm "$JUMP_NET_NAME" "$BASTION_OUT_NET" 2>/dev/null || true
+docker network create --internal --subnet "$JUMP_NET_SUBNET" "$JUMP_NET_NAME" >/dev/null
+docker network create "$BASTION_OUT_NET" >/dev/null
+
+# The target accepts root only from the bastion's address on the internal
+# network, so a direct connection from the host is refused. Without this the
+# host could reach the target on its own and the jump host would prove nothing.
+docker run -d --name "$TARGET_NAME" \
+    --network "$JUMP_NET_NAME" --ip "$TARGET_IP" \
+    --entrypoint /usr/sbin/sshd \
+    sshgo-test-server -D -e -o "AllowUsers=root@$BASTION_IP" >/dev/null
+
+# The bastion is published on a bridge network (so the host can reach it) and
+# attached to the internal one (so it can reach the target).
+docker run -d --name "$BASTION_NAME" \
+    --network "$BASTION_OUT_NET" \
+    -p "$BASTION_PORT:22" \
+    --entrypoint /usr/sbin/sshd \
+    sshgo-test-server -D -e >/dev/null
+docker network connect --ip "$BASTION_IP" "$JUMP_NET_NAME" "$BASTION_NAME" >/dev/null
+
+for name in "$TARGET_NAME" "$BASTION_NAME"; do
+    for i in $(seq 1 20); do
+        if docker logs "$name" 2>&1 | grep -q "Server listening on"; then
+            break
+        fi
+        sleep 0.5
+    done
+done
+
+# The same key opens both hops; each hop still authenticates as itself.
+cat /tmp/sshgo_test_ed25519.pub | docker exec -i "$BASTION_NAME" sh -c 'cat >> /root/.ssh/authorized_keys'
+cat /tmp/sshgo_test_ed25519.pub | docker exec -i "$TARGET_NAME" sh -c 'cat >> /root/.ssh/authorized_keys'
+docker exec "$BASTION_NAME" chmod 600 /root/.ssh/authorized_keys
+docker exec "$TARGET_NAME" chmod 600 /root/.ssh/authorized_keys
+
+# Prove the topology: the bastion reaches the target, the host does not.
+if docker exec "$BASTION_NAME" sh -c "nc -z -w2 $TARGET_IP 22" 2>/dev/null; then
+    echo -e "  ${GREEN}✓ bastion reaches the internal target${NC}"
+else
+    echo -e "  ${RED}✗ bastion cannot reach the internal target${NC}"
+    exit 1
+fi
+if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes \
+    -o ConnectTimeout=3 -i /tmp/sshgo_test_ed25519 -p 22 "root@$TARGET_IP" true 2>/dev/null; then
+    echo -e "  ${RED}✗ the host reaches the target directly; the jump host would not be load-bearing${NC}"
+    exit 1
+fi
+echo -e "  ${GREEN}✓ the target is reachable only through the bastion${NC}"
+
+# Both hops are ordinary sshgo Hosts: a jump host is an entry like any other.
+# Seeded here and re-seeded in the jump-chain phase, because the config tests
+# wipe ~/.sshgo_config.
+seed_jump_hosts() {
+    $SSHGO config set "$TEST_BASTION" hostname 127.0.0.1 >/dev/null 2>&1
+    $SSHGO config set "$TEST_BASTION" port "$BASTION_PORT" >/dev/null 2>&1
+    $SSHGO config set "$TEST_BASTION" user root >/dev/null 2>&1
+    $SSHGO config set "$TEST_BASTION" identity-file /tmp/sshgo_test_ed25519 >/dev/null 2>&1
+
+    $SSHGO config set "$TEST_JUMP_TARGET" hostname "$TARGET_IP" >/dev/null 2>&1
+    $SSHGO config set "$TEST_JUMP_TARGET" user root >/dev/null 2>&1
+    $SSHGO config set "$TEST_JUMP_TARGET" identity-file /tmp/sshgo_test_ed25519 >/dev/null 2>&1
+    $SSHGO config set "$TEST_JUMP_TARGET" proxy-jump "$TEST_BASTION" >/dev/null 2>&1
+}
+seed_jump_hosts
 
 echo -e "  ${GREEN}✓ Docker test environment ready${NC}"
 echo ""
@@ -730,6 +820,61 @@ assert_not_contains "exec --sudo: non-NOPASSWD command requires password" '"exit
 STDERR=$($SSHGO exec --sudo $TEST_HOST "/bin/hostname" 2>&1 1>/dev/null || true)
 assert_contains "exec --sudo: stderr hint about set-sudo-password" "set-sudo-password" "$STDERR"
 
+# ------------------------------------------------------------------
+# 2i: Jump chain tests
+# ------------------------------------------------------------------
+echo "  --- Jump Chain ---"
+
+# The config tests remove ~/.sshgo_config, so the jump entries are re-seeded.
+seed_jump_hosts
+
+# 2i-1: exec reaches the internal target through the bastion
+OUTPUT=$($SSHGO exec $TEST_JUMP_TARGET "echo jumped_ok" 2>/dev/null || true)
+assert_contains "jump: exec through bastion returns output" "jumped_ok" "$OUTPUT"
+assert_contains "jump: exec through bastion exits 0" '"exit_code": 0' "$OUTPUT"
+
+# 2i-2: the same target is unreachable without the jump host
+$SSHGO config unset $TEST_JUMP_TARGET proxy-jump >/dev/null 2>&1
+OUTPUT=$($SSHGO exec $TEST_JUMP_TARGET "echo direct_attempt" 2>/dev/null || true)
+assert_not_contains "jump: target is unreachable without the jump host" '"exit_code": 0' "$OUTPUT"
+$SSHGO config set $TEST_JUMP_TARGET proxy-jump "$TEST_BASTION" >/dev/null 2>&1
+
+# 2i-3: legacy mode goes through the jump host too
+OUTPUT=$($SSHGO $TEST_JUMP_TARGET "echo legacy_jump" 2>/dev/null || true)
+assert_eq "jump: legacy login through bastion" "legacy_jump" "$OUTPUT"
+
+# 2i-4: info reports the jump chain without dialling
+OUTPUT=$($SSHGO info $TEST_JUMP_TARGET 2>/dev/null || true)
+assert_contains "jump: info shows the jump chain" "Jump:" "$OUTPUT"
+assert_contains "jump: info names the bastion" "$TEST_BASTION" "$OUTPUT"
+
+# 2i-5: info --json carries a jump array whose elements describe the hop
+OUTPUT=$($SSHGO info --json $TEST_JUMP_TARGET 2>/dev/null || true)
+assert_contains "jump: info --json has a jump array" '"jump"' "$OUTPUT"
+assert_contains "jump: jump element names the bastion" "\"name\": \"$TEST_BASTION\"" "$OUTPUT"
+echo "$OUTPUT" | python3 -m json.tool > /dev/null 2>&1 && pass "jump: info --json is valid JSON" || fail "jump: info --json is invalid JSON"
+
+# 2i-6: a single-hop host has no jump field at all
+OUTPUT=$($SSHGO info --json $TEST_HOST 2>/dev/null || true)
+assert_not_contains "jump: single-hop info --json has no jump field" '"jump"' "$OUTPUT"
+
+# 2i-7: a broken chain is reported before anything is dialled
+$SSHGO config set $TEST_JUMP_TARGET proxy-jump ghost-bastion >/dev/null 2>&1
+OUTPUT=$($SSHGO exec $TEST_JUMP_TARGET "true" 2>/dev/null || true)
+assert_contains "jump: broken chain names the jump host" 'Jump host \"ghost-bastion\"' "$OUTPUT"
+assert_contains "jump: broken chain offers config import" "config import" "$OUTPUT"
+assert_contains "jump: broken chain exits 1" '"exit_code": 1' "$OUTPUT"
+
+# 2i-8: info refuses to describe a host it could not connect to
+OUTPUT=$($SSHGO info $TEST_JUMP_TARGET 2>&1 || true)
+assert_contains "jump: info errors on a broken chain" "not found" "$OUTPUT"
+
+# 2i-10: `none` means a direct connection, not an error
+$SSHGO config set $TEST_HOST proxy-jump none >/dev/null 2>&1
+OUTPUT=$($SSHGO exec $TEST_HOST "echo none_ok" 2>/dev/null || true)
+assert_contains "jump: proxy-jump none means direct" "none_ok" "$OUTPUT"
+$SSHGO config unset $TEST_HOST proxy-jump >/dev/null 2>&1
+
 enable_strict
 
 # ============================================================================
@@ -777,8 +922,9 @@ fi
 rm -f ~/.sshgo_config
 rm -f /tmp/sshgo_test_ed25519 /tmp/sshgo_test_ed25519.pub
 
-# Stop and remove Docker container and image
-docker rm -f "$CONTAINER_NAME" 2>&1 | sed 's/^/  /'
+# Stop and remove Docker containers, network, and image
+docker rm -f "$CONTAINER_NAME" "$BASTION_NAME" "$TARGET_NAME" 2>&1 | sed 's/^/  /'
+docker network rm "$JUMP_NET_NAME" "$BASTION_OUT_NET" 2>&1 | sed 's/^/  /' || true
 docker rmi sshgo-test-server 2>&1 | sed 's/^/  /'
 
 echo -e "  ${GREEN}✓ Cleanup complete${NC}"

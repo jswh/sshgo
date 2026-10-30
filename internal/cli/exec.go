@@ -97,7 +97,7 @@ func (c *CLI) parseExecFlags(args []string) (execFlags, []string, int, bool) {
 func (c *CLI) executeRemote(target host.Resolved, command string, flags execFlags) ExecResult {
 	auth := &execAuth{cli: c, needSudo: flags.Sudo}
 
-	client, err := connect.Dial(target, auth, connect.Options{Timeout: 30 * time.Second})
+	client, cleanup, err := connect.Chain(target, auth, connect.Options{Timeout: 30 * time.Second})
 	if err != nil {
 		return ExecResult{
 			Command:  command,
@@ -105,7 +105,7 @@ func (c *CLI) executeRemote(target host.Resolved, command string, flags execFlag
 			ExitCode: 1,
 		}
 	}
-	defer client.Close()
+	defer cleanup()
 
 	sudoPwd, hasSudo := auth.SudoPassword(target)
 	if flags.Sudo {
@@ -151,6 +151,20 @@ func sudoInput(sudo bool, password string, has bool) string {
 // wording is the frozen pre-refactor wording: a missing authentication method
 // stands alone, everything else is prefixed with the phase it failed in.
 func execDialError(err error) string {
+	// Chain and jump failures are already complete sentences naming the hop;
+	// prefixing them again would make the jump and the target indistinguishable.
+	var chainErr *connect.ChainError
+	if errors.As(err, &chainErr) {
+		return chainErr.Error()
+	}
+	var jumpErr *connect.JumpError
+	if errors.As(err, &jumpErr) {
+		return jumpErr.Error()
+	}
+	var jumpNoAuth *connect.JumpNoAuthError
+	if errors.As(err, &jumpNoAuth) {
+		return jumpNoAuth.Error()
+	}
 	if errors.Is(err, connect.ErrNoAuthMethod) {
 		return connect.ErrNoAuthMethod.Error()
 	}

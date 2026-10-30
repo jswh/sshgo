@@ -19,6 +19,12 @@ RUN sed -i 's/^#PermitRootLogin yes/PermitRootLogin yes/' /etc/ssh/sshd_config &
 # Allow root login with password for direct auth testing
 RUN sed -i 's/^#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null || true
 
+# Jump-chain tests use this image for both the bastion and the target. A bastion
+# must accept direct-tcpip channels, which the shipped config disables. sshd
+# keeps the first value it sees, so the existing line is replaced, not appended.
+RUN sed -i 's/^AllowTcpForwarding no/AllowTcpForwarding yes/' /etc/ssh/sshd_config && \
+    grep -qx 'AllowTcpForwarding yes' /etc/ssh/sshd_config
+
 # Generate SSH host keys
 RUN ssh-keygen -A
 

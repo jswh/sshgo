@@ -288,3 +288,81 @@ func sortedKeys(m map[string]json.RawMessage) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+// ---------------------------------------------------------------------------
+// Jump-chain wording. A broken chain is reported before anything is dialled, so
+// the full text is assertable in-process: in the exec JSON `stderr` field, and
+// on stderr for the interactive path.
+// ---------------------------------------------------------------------------
+
+func TestChainErrorText(t *testing.T) {
+	const notFound = `Jump host "bastion" for "db1" not found.
+  Import your SSH config:  sshgo config import
+  Add it manually:         sshgo config set bastion hostname <address>
+  Or connect directly:     sshgo user@host or sshgo host:port`
+	const noDetails = `Jump host "bastion" for "db1" has no connection details.
+  Set one: sshgo config set bastion hostname <address>`
+	const unsupported = `Jump host "ssh://bastion:22" for "db1" is not an sshgo address.
+  Use a Host name, an Alias, or a Direct Address (user@host:port)`
+
+	tests := []struct {
+		name string
+		seed map[string]string
+		want string
+	}{
+		{name: "jump host not found", seed: map[string]string{"proxy-jump": "bastion"}, want: notFound},
+		{name: "jump host has no connection details", seed: map[string]string{"proxy-jump": "bastion", "bastion": "manual"}, want: noDetails},
+		{name: "unsupported jump value", seed: map[string]string{"proxy-jump": "ssh://bastion:22"}, want: unsupported},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setupTempHome(t)
+			seedHost(t, "db1", map[string]string{"hostname": "10.0.0.5", "proxy-jump": tc.seed["proxy-jump"]})
+			if tc.seed["bastion"] == "manual" {
+				seedHost(t, "bastion", map[string]string{"notes": "created by hand"})
+			}
+
+			// exec reports through its JSON envelope.
+			code, stdout, _ := run(t, "exec", "db1", "true")
+			if code != 1 {
+				t.Errorf("exec exit code = %d, want 1", code)
+			}
+			var result ExecResult
+			if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+				t.Fatalf("exec output is not JSON: %v", err)
+			}
+			if result.Stderr != tc.want {
+				t.Errorf("exec stderr =\n%q\nwant\n%q", result.Stderr, tc.want)
+			}
+			if result.ExitCode != 1 {
+				t.Errorf("exec JSON exit_code = %d, want 1", result.ExitCode)
+			}
+
+			// The interactive path reports on stderr with exit code 1.
+			code, _, stderr := run(t, "db1")
+			if code != 1 {
+				t.Errorf("legacy exit code = %d, want 1", code)
+			}
+			if stderr != "Error: "+tc.want+"\n" {
+				t.Errorf("legacy stderr =\n%q\nwant\n%q", stderr, "Error: "+tc.want+"\n")
+			}
+		})
+	}
+}
+
+// A jump host may be an Alias or a Direct Address: one addressing grammar for
+// the whole project, so a value that resolves is never rejected.
+func TestProxyJumpAcceptsAliasAndDirectAddress(t *testing.T) {
+	for _, value := range []string{"bastion-alias", "root@10.0.0.9:2222"} {
+		t.Run(value, func(t *testing.T) {
+			setupTempHome(t)
+			seedHost(t, "db1", map[string]string{"hostname": "10.0.0.5", "proxy-jump": value})
+			seedHost(t, "bastion", map[string]string{"hostname": "10.0.0.9", "alias": "bastion-alias"})
+
+			if code, _, stderr := run(t, "info", "db1"); code != 0 {
+				t.Errorf("info db1 exit code = %d, want 0 (stderr %q)", code, stderr)
+			}
+		})
+	}
+}

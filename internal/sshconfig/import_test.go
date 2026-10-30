@@ -103,9 +103,10 @@ func TestImportRecordsSourceImported(t *testing.T) {
 	}
 }
 
-// ProxyJump is stored but unused; import must say so instead of letting the
-// connection fail later.
-func TestImportWarnsAboutProxyJump(t *testing.T) {
+// ProxyJump is imported as a plain connection detail and is not validated here:
+// resolution is the only authority, and a forward reference (target first, jump
+// host later) is a legal order. Import must therefore stay silent about it.
+func TestImportStoresProxyJumpSilently(t *testing.T) {
 	src := newFakeSSHConfig().
 		add("behind-bastion", map[string]string{"Hostname": "10.0.0.9", "ProxyJump": "bastion"}).
 		add("direct", map[string]string{"Hostname": "10.0.0.10"})
@@ -120,11 +121,8 @@ func TestImportWarnsAboutProxyJump(t *testing.T) {
 		t.Errorf("ProxyJump = %q, want it stored as %q", meta.ProxyJump, "bastion")
 	}
 
-	if len(result.Warnings) != 1 {
-		t.Fatalf("warnings = %v, want exactly one for the jump host", result.Warnings)
-	}
-	if w := result.Warnings[0]; !strings.Contains(w, "behind-bastion") || !strings.Contains(w, "not supported") {
-		t.Errorf("warning %q does not name the host and the limitation", w)
+	if len(result.Warnings) != 0 {
+		t.Errorf("warnings = %v, want none: import does not validate the jump chain", result.Warnings)
 	}
 }
 

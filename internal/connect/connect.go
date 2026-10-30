@@ -61,38 +61,16 @@ func (e *DialError) Unwrap() error { return e.Err }
 type Options struct {
 	// Timeout bounds the TCP and handshake phase; zero means no timeout.
 	Timeout time.Duration
+	// Resolve resolves one addressed string into a Host. Nil means the real
+	// resolution entry point; tests inject a fake to drive chain semantics
+	// without a metadata file.
+	Resolve Resolver
 }
 
-// Dial opens a single-hop client to hop.
-//
-// A future Chain will resolve the jump chain and call Dial per hop; the chain
-// itself is not implemented here yet.
+// Dial opens a single-hop client to hop, ignoring any proxy-jump on it. Use
+// Chain when the Host may have a jump chain.
 func Dial(hop host.Resolved, auth Authenticator, opts Options) (*ssh.Client, error) {
-	cred, err := auth.HopAuth(hop)
-	if err != nil {
-		return nil, &AuthError{Err: err}
-	}
-	if cred.Cleanup != nil {
-		defer cred.Cleanup()
-	}
-	if len(cred.Methods) == 0 {
-		return nil, ErrNoAuthMethod
-	}
-
-	clientConfig := &ssh.ClientConfig{
-		User:            hop.User,
-		Auth:            cred.Methods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         opts.Timeout,
-	}
-
-	// Direct string concatenation, not net.JoinHostPort: IPv6 input is rejected
-	// during resolution, so the two forms are identical here.
-	client, err := ssh.Dial("tcp", hop.Hostname+":"+hop.Port, clientConfig)
-	if err != nil {
-		return nil, &DialError{Err: err}
-	}
-	return client, nil
+	return dialHop(nil, hop, auth, opts)
 }
 
 // PTYName is the terminal type requested for interactive shells.

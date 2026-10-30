@@ -172,12 +172,12 @@ func buildHostList() []hostEntry {
 func (c *CLI) connectToHost(target host.Resolved, command string) int {
 	auth := &interactiveAuth{cli: c}
 
-	client, err := connect.Dial(target, auth, connect.Options{})
+	client, cleanup, err := connect.Chain(target, auth, connect.Options{})
 	if err != nil {
-		fmt.Fprintf(c.Err, "Error: %s: %v\n", dialFailureLabel(err), connect.Cause(err))
+		fmt.Fprintf(c.Err, "Error: %s\n", dialFailureMessage(err))
 		return 1
 	}
-	defer client.Close()
+	defer cleanup()
 
 	session, err := connect.NewSession(client)
 	if err != nil {
@@ -195,6 +195,25 @@ func (c *CLI) connectToHost(target host.Resolved, command string) int {
 		fmt.Fprintf(c.Err, "Error: %s: %v\n", sessionFailureLabel(err), connect.Cause(err))
 	}
 	return code
+}
+
+// dialFailureMessage renders a dial failure for the interactive path. Chain and
+// jump failures carry their own complete wording (a jump failure names the hop
+// and its address); everything else keeps the phase label it has always had.
+func dialFailureMessage(err error) string {
+	var chainErr *connect.ChainError
+	if errors.As(err, &chainErr) {
+		return chainErr.Error()
+	}
+	var jumpErr *connect.JumpError
+	if errors.As(err, &jumpErr) {
+		return jumpErr.Error()
+	}
+	var jumpNoAuth *connect.JumpNoAuthError
+	if errors.As(err, &jumpNoAuth) {
+		return jumpNoAuth.Error()
+	}
+	return fmt.Sprintf("%s: %v", dialFailureLabel(err), connect.Cause(err))
 }
 
 // dialFailureLabel names the phase a dial failure belongs to. Authentication

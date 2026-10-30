@@ -72,13 +72,9 @@ func BuildSnapshot(src Source, existing map[string]host.HostMeta) Result {
 		result.Hosts[name] = meta
 		result.Imported++
 
-		// ProxyJump is stored but not honoured yet; say so at import time
-		// rather than letting the user discover it when a connection fails.
-		if meta.ProxyJump != "" {
-			result.Warnings = append(result.Warnings,
-				fmt.Sprintf("Host %q has ProxyJump %q: imported, but jump-host connections are not supported yet.",
-					name, meta.ProxyJump))
-		}
+		// ProxyJump is imported as-is and validated when a connection is
+		// resolved, never here: a forward reference (target first, jump host
+		// later) is a legal order, so a warning would be noise.
 	}
 
 	sort.Slice(result.Skipped, func(i, j int) bool { return result.Skipped[i].Pattern < result.Skipped[j].Pattern })
