@@ -1,20 +1,13 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
+	"errors"
 	"fmt"
-	"net"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/agent"
-	"golang.org/x/term"
-
-	"sshgo/internal/credential"
+	"sshgo/internal/connect"
 	"sshgo/internal/host"
 )
 
@@ -95,233 +88,71 @@ func parseExecFlags(args *[]string) execFlags {
 }
 
 // executeRemote dials the host, runs a command, and returns structured output.
+// The sudo password reaches the session through a separate exit, never through
+// the authentication methods.
 func executeRemote(target host.Resolved, command string, flags execFlags) ExecResult {
-	// 1. Collect all key signers (agent + file) for a single publickey method
-	var allSigners []ssh.Signer
-	var agentConn net.Conn
-	if conn, err := net.Dial("unix", os.Getenv("SSH_AUTH_SOCK")); err == nil {
-		agentConn = conn
-		sshAgent := agent.NewClient(conn)
-		if signers, err := sshAgent.Signers(); err == nil && len(signers) > 0 {
-			allSigners = append(allSigners, signers...)
-			fmt.Fprintln(os.Stderr, "exec: using SSH agent keys")
-		}
-	}
+	auth := &execAuth{needSudo: flags.Sudo}
 
-	// 2. Build non-agent auth methods (file signers + sudo password)
-	fileSigners, passwordForSudo, hasPassword := buildAuthMethodsNonInteractive(target, flags.Sudo)
-	allSigners = append(allSigners, fileSigners...)
-
-	// Combine all public key signers into ONE method
-	var methods []ssh.AuthMethod
-	if len(allSigners) > 0 {
-		methods = append(methods, ssh.PublicKeys(allSigners...))
-	}
-	if hasPassword {
-		// Password method is separate (different method name "password")
-		methods = append(methods, ssh.Password(passwordForSudo))
-	}
-	if len(methods) == 0 {
-		if agentConn != nil {
-			agentConn.Close()
-		}
-		return ExecResult{
-			Command:  command,
-			Stderr:   "No authentication method available (no SSH agent, keys, or saved passwords)",
-			ExitCode: 1,
-		}
-	}
-
-	clientConfig := &ssh.ClientConfig{
-		User:            target.User,
-		Auth:            methods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         30 * time.Second,
-	}
-
-	client, err := ssh.Dial("tcp", target.Hostname+":"+target.Port, clientConfig)
-	if agentConn != nil {
-		agentConn.Close()
-	}
+	client, err := connect.Dial(target, auth, connect.Options{Timeout: 30 * time.Second})
 	if err != nil {
 		return ExecResult{
 			Command:  command,
-			Stderr:   fmt.Sprintf("Connection failed: %v", err),
+			Stderr:   execDialError(err),
 			ExitCode: 1,
 		}
 	}
 	defer client.Close()
 
+	sudoPwd, hasSudo := auth.SudoPassword(target)
 	if flags.Sudo {
-		if passwordForSudo != "" {
+		if hasSudo && sudoPwd != "" {
 			command = "sudo -S -p '' " + command
 		} else {
 			command = "sudo " + command
 		}
 	}
 
-	session, err := client.NewSession()
+	session, err := connect.NewSession(client)
 	if err != nil {
 		return ExecResult{
 			Command:  command,
-			Stderr:   fmt.Sprintf("Session creation failed: %v", err),
+			Stderr:   fmt.Sprintf("Session creation failed: %v", connect.Cause(err)),
 			ExitCode: 1,
 		}
 	}
-	defer session.Close()
 
-	var stdoutBuf, stderrBuf bytes.Buffer
-	session.Stdout = &stdoutBuf
-	session.Stderr = &stderrBuf
-
-	if flags.Sudo && passwordForSudo != "" {
-		session.Stdin = strings.NewReader(passwordForSudo + "\n")
-	}
-
-	err = session.Run(command)
-	exitCode := 0
-	if exitErr, ok := err.(*ssh.ExitError); ok {
-		exitCode = exitErr.ExitStatus()
-	} else if err != nil {
-		stderrBuf.WriteString(fmt.Sprintf("\nSession error: %v", err))
-		exitCode = 1
-	}
-
-	return ExecResult{
+	captured, err := connect.RunCapture(session, command, sudoInput(flags.Sudo, sudoPwd, hasSudo))
+	result := ExecResult{
 		Command:  command,
-		Stdout:   stdoutBuf.String(),
-		Stderr:   stderrBuf.String(),
-		ExitCode: exitCode,
+		Stdout:   captured.Stdout,
+		Stderr:   captured.Stderr,
+		ExitCode: captured.ExitCode,
 	}
+	if err != nil {
+		result.Stderr = fmt.Sprintf("%s\nSession error: %v", captured.Stderr, connect.Cause(err))
+		result.ExitCode = 1
+	}
+	return result
 }
 
-// buildAuthMethodsNonInteractive collects file-based key signers and returns them
-// along with a sudo password if available.
-// Priority for sudo password: saved sudo password > saved SSH password > interactive prompt.
-func buildAuthMethodsNonInteractive(target host.Resolved, needSudo bool) ([]ssh.Signer, string, bool) {
-	var fileSigners []ssh.Signer
-	identityFile := target.IdentityFile
-
-	// Try configured IdentityFile (skip passphrase-protected keys non-interactively)
-	if identityFile != "" {
-		identityFile = host.ExpandPath(identityFile)
-		if signer := tryLoadKey(identityFile); signer != nil {
-			fileSigners = append(fileSigners, signer)
-			fmt.Fprintln(os.Stderr, "exec: using identity file")
-		}
-	}
-
-	// Try default keys
-	if identityFile == "" {
-		homeDir, _ := os.UserHomeDir()
-		for _, keyName := range []string{"id_rsa", "id_ed25519", "id_ecdsa"} {
-			keyPath := filepath.Join(homeDir, ".ssh", keyName)
-			if signer := tryLoadKey(keyPath); signer != nil {
-				fileSigners = append(fileSigners, signer)
-			}
-		}
-	}
-
-	hasKeyAuth := len(fileSigners) > 0
-
-	// If sudo is needed or no key auth, try saved passwords (may prompt for master password)
-	if needSudo || !hasKeyAuth {
-		store := tryLoadPasswordStoreInteractive()
-		if store != nil {
-			// First try saved sudo password
-			if needSudo {
-				if pwd, ok := credential.LookupSudoPassword(store, target.CredKeys); ok {
-					fmt.Fprintln(os.Stderr, "exec: using saved sudo password")
-					return fileSigners, pwd, !hasKeyAuth
-				}
-			}
-			// Then try saved SSH password
-			if pwd, ok := credential.LookupSavedPassword(store, target.CredKeys); ok {
-				fmt.Fprintln(os.Stderr, "exec: using saved password")
-				return fileSigners, pwd, !hasKeyAuth
-			}
-		}
-	}
-
-	// Key auth + sudo + no saved passwords → prompt for sudo password
-	if needSudo && hasKeyAuth {
-		if pwd := promptSudoPassword(target); pwd != "" {
-			return fileSigners, pwd, false
-		}
-	}
-
-	return fileSigners, "", false
-}
-
-// promptSudoPassword interactively prompts for a sudo password with option to save.
-// Uses stderr for prompts and term.ReadPassword to avoid corrupting stdout.
-// In non-interactive terminals, prints a hint and returns "".
-// The password is saved under the addressed host key, matching
-// `config set-sudo-password <host>`.
-func promptSudoPassword(target host.Resolved) string {
-	hostKey := target.CredKeys[0]
-	if !isInteractive() {
-		fmt.Fprintf(os.Stderr, "sudo password required for %s@%s. Use `sshgo config set-sudo-password %s` to set one.\n", target.User, target.Hostname, hostKey)
+// sudoInput returns the password to feed `sudo -S` on the target session.
+func sudoInput(sudo bool, password string, has bool) string {
+	if !sudo || !has {
 		return ""
 	}
-	fmt.Fprintf(os.Stderr, "sudo password for %s@%s (empty = NOPASSWD): ", target.User, target.Hostname)
-	pwdBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Fprintln(os.Stderr)
-	if err != nil {
-		return ""
-	}
-	pwd := string(pwdBytes)
-	if pwd == "" {
-		return ""
-	}
-
-	// Ask to save
-	fmt.Fprintf(os.Stderr, "Save sudo password? (y/n): ")
-	reader := bufio.NewReader(os.Stdin)
-	answer, _ := reader.ReadString('\n')
-	answer = strings.TrimSpace(answer)
-	if strings.ToLower(answer) == "y" {
-		store, err := initPasswordStore()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to init password store: %v\n", err)
-		} else if err := store.SetSudoPassword(hostKey, pwd); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to save sudo password: %v\n", err)
-		} else {
-			fmt.Fprintln(os.Stderr, "sudo password saved")
-		}
-	}
-
-	return pwd
+	return password
 }
 
-// isInteractive checks whether stdout is a terminal (TTY).
-// Uses stdout instead of stdin so that subshells (e.g. test scripts with $())
-// are correctly detected as non-interactive, avoiding hangs on prompts.
-// Uses term.IsTerminal instead of ModeCharDevice because /dev/null is also
-// a character device on some systems but is not a TTY.
-func isInteractive() bool {
-	return term.IsTerminal(int(os.Stdout.Fd()))
-}
-
-// tryLoadKey tries to load a private key without passphrase prompts. Returns nil on failure.
-func tryLoadKey(path string) ssh.Signer {
-	key, err := os.ReadFile(path)
-	if err != nil {
-		return nil
+// execDialError renders a dial failure for the exec JSON `stderr` field. The
+// wording is the frozen pre-refactor wording: a missing authentication method
+// stands alone, everything else is prefixed with the phase it failed in.
+func execDialError(err error) string {
+	if errors.Is(err, connect.ErrNoAuthMethod) {
+		return connect.ErrNoAuthMethod.Error()
 	}
-	signer, err := ssh.ParsePrivateKey(key)
-	if err != nil {
-		return nil // skip passphrase-protected keys
+	var authErr *connect.AuthError
+	if errors.As(err, &authErr) {
+		return fmt.Sprintf("Authentication failed: %v", connect.Cause(err))
 	}
-	return signer
-}
-
-// tryLoadPasswordStoreInteractive loads the password store, prompting for master password.
-// Returns nil if the file doesn't exist or the user cancels.
-func tryLoadPasswordStoreInteractive() *credential.Store {
-	path := credential.Path()
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return nil
-	}
-	return loadSavedPasswords()
+	return fmt.Sprintf("Connection failed: %v", connect.Cause(err))
 }

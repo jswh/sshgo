@@ -1,17 +1,16 @@
 package main
 
 import (
+	"errors"
 	"fmt"
-	"net"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/term"
 
+	"sshgo/internal/connect"
 	"sshgo/internal/credential"
 	"sshgo/internal/host"
 	"sshgo/internal/ui"
@@ -176,169 +175,66 @@ func buildHostList() []hostEntry {
 }
 
 func connectToHost(target host.Resolved, command string) {
-	// 1. Collect all key signers (agent + file) for a single publickey method
-	var allSigners []ssh.Signer
-	var agentConn net.Conn
-	if conn, err := net.Dial("unix", os.Getenv("SSH_AUTH_SOCK")); err == nil {
-		agentConn = conn
-		sshAgent := agent.NewClient(conn)
-		if signers, err := sshAgent.Signers(); err == nil && len(signers) > 0 {
-			allSigners = append(allSigners, signers...)
-			fmt.Fprintln(os.Stderr, "Using SSH agent keys")
-		}
-	}
-
-	// 2. Build non-agent auth methods (file signers + passwords)
-	fileSigners, extraMethods, err := buildAuthMethods(target, target.IdentityFile)
+	client, err := connect.Dial(target, interactiveAuth{}, connect.Options{})
 	if err != nil {
-		if agentConn != nil {
-			agentConn.Close()
-		}
-		fmt.Fprintf(os.Stderr, "Error: Authentication failed: %v\n", err)
-		os.Exit(1)
-	}
-	allSigners = append(allSigners, fileSigners...)
-
-	// Combine all public key signers into ONE method
-	var methods []ssh.AuthMethod
-	if len(allSigners) > 0 {
-		methods = append(methods, ssh.PublicKeys(allSigners...))
-	}
-	methods = append(methods, extraMethods...)
-
-	clientConfig := &ssh.ClientConfig{
-		User:            target.User,
-		Auth:            methods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-	}
-
-	client, err := ssh.Dial("tcp", target.Hostname+":"+target.Port, clientConfig)
-	if agentConn != nil {
-		agentConn.Close() // safe to close after auth completes
-	}
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Connection failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %s: %v\n", dialFailureLabel(err), connect.Cause(err))
 		os.Exit(1)
 	}
 	defer client.Close()
 
-	session, err := client.NewSession()
+	session, err := connect.NewSession(client)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to create session: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: Failed to create session: %v\n", connect.Cause(err))
 		os.Exit(1)
 	}
-	defer session.Close()
 
-	if command == "" {
-		// Interactive shell - request PTY
-		modes := ssh.TerminalModes{
-			ssh.ECHO:          1,
-			ssh.TTY_OP_ISPEED: 14400,
-			ssh.TTY_OP_OSPEED: 14400,
-		}
-
-		fd := int(os.Stdin.Fd())
-		width, height, _ := term.GetSize(fd)
-		if width == 0 {
-			width = 80
-		}
-		if height == 0 {
-			height = 24
-		}
-
-		if err := session.RequestPty("xterm-256color", height, width, modes); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Failed to request PTY: %v\n", err)
-			os.Exit(1)
-		}
+	width, height := terminalSize()
+	code, err := connect.RunInteractive(session, command, connect.Streams{
+		In:  os.Stdin,
+		Out: os.Stdout,
+		Err: os.Stderr,
+	}, width, height)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s: %v\n", sessionFailureLabel(err), connect.Cause(err))
 	}
-
-	session.Stdin = os.Stdin
-	session.Stdout = os.Stdout
-	session.Stderr = os.Stderr
-
-	if command != "" {
-		// Execute remote command
-		if err := session.Run(command); err != nil {
-			if exitErr, ok := err.(*ssh.ExitError); ok {
-				os.Exit(exitErr.ExitStatus())
-			}
-			os.Exit(1)
-		}
-	} else {
-		// Start interactive shell
-		if err := session.Shell(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Failed to start shell: %v\n", err)
-			os.Exit(1)
-		}
-
-		if err := session.Wait(); err != nil {
-			os.Exit(0)
-		}
-	}
+	os.Exit(code)
 }
 
-// buildAuthMethods collects file-based key signers plus password methods for an
-// interactive login. Passwords are looked up and saved by Credential Key, so an
-// entry saved for the addressed name is found here as well as by `exec`.
-func buildAuthMethods(target host.Resolved, identityFile string) ([]ssh.Signer, []ssh.AuthMethod, error) {
-	var fileSigners []ssh.Signer
-	var extraMethods []ssh.AuthMethod
+// dialFailureLabel names the phase a dial failure belongs to. Authentication
+// and connection failures are distinct: they point at different fixes.
+func dialFailureLabel(err error) string {
+	var authErr *connect.AuthError
+	if errors.As(err, &authErr) || errors.Is(err, connect.ErrNoAuthMethod) {
+		return "Authentication failed"
+	}
+	return "Connection failed"
+}
 
-	// 1. Try configured IdentityFile
-	if identityFile != "" {
-		identityFile = host.ExpandPath(identityFile)
-		if signer, err := loadPrivateKey(identityFile); err == nil {
-			fileSigners = append(fileSigners, signer)
-			fmt.Fprintf(os.Stderr, "Using key: %s\n", identityFile)
+// sessionFailureLabel names the session step that failed.
+func sessionFailureLabel(err error) string {
+	var sessionErr *connect.Error
+	if errors.As(err, &sessionErr) {
+		switch sessionErr.Op {
+		case connect.OpPTY:
+			return "Failed to request PTY"
+		case connect.OpShell:
+			return "Failed to start shell"
 		}
 	}
+	return "Session failed"
+}
 
-	// 2. Try default keys (only if no IdentityFile configured)
-	if identityFile == "" {
-		homeDir, _ := os.UserHomeDir()
-		for _, keyName := range []string{"id_rsa", "id_ed25519", "id_ecdsa"} {
-			keyPath := filepath.Join(homeDir, ".ssh", keyName)
-			if signer, err := loadPrivateKey(keyPath); err == nil {
-				fileSigners = append(fileSigners, signer)
-			}
-		}
+// terminalSize reports the local terminal size, defaulting to 80x24 when it
+// cannot be determined (not a TTY, or a platform without a size query).
+func terminalSize() (width, height int) {
+	width, height, _ = term.GetSize(int(os.Stdin.Fd()))
+	if width == 0 {
+		width = 80
 	}
-
-	// 3. Check saved passwords. The store is loaded here rather than passed in
-	// because loading may prompt for the master password, which should only
-	// happen when key auth is not enough.
-	if savedPwd, ok := credential.LookupSavedPassword(loadSavedPasswords(), target.CredKeys); ok {
-		extraMethods = append(extraMethods, ssh.Password(savedPwd))
-		fmt.Fprintln(os.Stderr, "Using saved password")
-		return fileSigners, extraMethods, nil
+	if height == 0 {
+		height = 24
 	}
-
-	// 4. Return if we have any auth methods
-	if len(fileSigners) > 0 || len(extraMethods) > 0 {
-		return fileSigners, extraMethods, nil
-	}
-
-	// 5. Prompt for password
-	password, err := ui.Password(fmt.Sprintf("Enter password for %s@%s", target.User, target.Hostname))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to enter password: %w", err)
-	}
-
-	extraMethods = append(extraMethods, ssh.Password(password))
-
-	// Ask to save password
-	if ui.YesNo("Save password?", "n") {
-		store, err := initPasswordStore()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to initialize password store: %v\n", err)
-		} else if err := store.Set(target.CredKeys[0], password); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to save password: %v\n", err)
-		} else {
-			fmt.Fprintln(os.Stderr, "Password saved")
-		}
-	}
-
-	return fileSigners, extraMethods, nil
+	return width, height
 }
 
 func loadPrivateKey(path string) (ssh.Signer, error) {
