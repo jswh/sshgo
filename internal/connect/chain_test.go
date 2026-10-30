@@ -556,3 +556,52 @@ func waitFor(t *testing.T, cond func() bool, message string) {
 	}
 	t.Fatal(message)
 }
+
+// A target with no authentication method is named when it sits at the end of a
+// chain: in a multi-hop setup "no authentication method" alone does not say
+// which end to fix. A single-hop Host keeps its existing wording.
+func TestChainTargetNoAuthNamesTheTargetInAChain(t *testing.T) {
+	srv := startTestServer(t)
+	jump, target := srv.resolvedHost(), srv.resolvedHost()
+	jump.Name, target.Name = "bastion", "db1"
+	target.ProxyJump = "bastion"
+
+	auth := &hopAuthFunc{auth: func(hop host.Resolved) (HopCredentials, error) {
+		if hop.Name == "bastion" {
+			return HopCredentials{Methods: passwordAuth("pw")}, nil
+		}
+		return HopCredentials{}, nil
+	}}
+
+	_, _, err := Chain(target, auth, Options{Resolve: fakeResolver{"bastion": jump}.resolve})
+	if err == nil {
+		t.Fatal("Chain() with an unauthenticated target succeeded")
+	}
+
+	var targetErr *TargetNoAuthError
+	if !errors.As(err, &targetErr) {
+		t.Fatalf("error = %v, want a TargetNoAuthError naming the target", err)
+	}
+	want := `Host "db1" has no authentication method. Save one: sshgo config set-password db1`
+	if err.Error() != want {
+		t.Errorf("error =\n%q\nwant\n%q", err.Error(), want)
+	}
+}
+
+// The single-hop wording is frozen: no host name, no hint.
+func TestChainSingleHopNoAuthKeepsFrozenText(t *testing.T) {
+	srv := startTestServer(t)
+	target := srv.resolvedHost()
+
+	auth := &hopAuthFunc{auth: func(host.Resolved) (HopCredentials, error) {
+		return HopCredentials{}, nil
+	}}
+
+	_, _, err := Chain(target, auth, Options{})
+	if !errors.Is(err, ErrNoAuthMethod) {
+		t.Fatalf("error = %v, want the frozen ErrNoAuthMethod", err)
+	}
+	if err.Error() != ErrNoAuthMethod.Error() {
+		t.Errorf("error = %q, want the frozen single-hop text", err)
+	}
+}

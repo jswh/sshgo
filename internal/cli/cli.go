@@ -31,6 +31,17 @@ type CLI struct {
 	Version string
 	Out     io.Writer
 	Err     io.Writer
+
+	// masterPassword reads the master password from the user. Nil means the
+	// terminal prompt; tests inject a fake so the store can be exercised
+	// without a TTY.
+	masterPassword func(label string) (string, error)
+
+	// store caches the unlocked password store for this invocation. One call
+	// unlocks it once, no matter how many hops ask for a password, and a save
+	// reuses the same session instead of prompting again.
+	store       passwordStore
+	storeOpened bool
 }
 
 // Run dispatches a subcommand and returns the process exit code.
@@ -213,6 +224,10 @@ func dialFailureMessage(err error) string {
 	if errors.As(err, &jumpNoAuth) {
 		return jumpNoAuth.Error()
 	}
+	var targetNoAuth *connect.TargetNoAuthError
+	if errors.As(err, &targetNoAuth) {
+		return targetNoAuth.Error()
+	}
 	return fmt.Sprintf("%s: %v", dialFailureLabel(err), connect.Cause(err))
 }
 
@@ -253,29 +268,78 @@ func terminalSize() (width, height int) {
 	return width, height
 }
 
-func (c *CLI) initPasswordStore() (*credential.Store, error) {
-	path := credential.Path()
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		fmt.Fprintln(c.Out, "First time setup: Please set a master password for encryption")
-		masterPwd, err := ui.Password("Set master password")
-		if err != nil {
-			return nil, fmt.Errorf("failed to set master password: %w", err)
-		}
-		confirmPwd, err := ui.Password("Confirm master password")
-		if err != nil {
-			return nil, fmt.Errorf("failed to confirm master password: %w", err)
-		}
-		if masterPwd != confirmPwd {
-			return nil, fmt.Errorf("passwords do not match")
-		}
-		return credential.Load(masterPwd)
+// readMasterPassword reads the master password, defaulting to the terminal
+// prompt. Tests replace it to drive the store without a TTY.
+func (c *CLI) readMasterPassword(label string) (string, error) {
+	if c.masterPassword != nil {
+		return c.masterPassword(label)
+	}
+	return ui.Password(label)
+}
+
+// openStore returns the password store for this invocation, unlocking it at most
+// once. It returns nil when there is nothing to unlock (no store file) or when
+// the user cancels the master password; both degrade to key-only auth instead of
+// aborting the connection.
+func (c *CLI) openStore() passwordStore {
+	if c.storeOpened {
+		return c.store
+	}
+	c.storeOpened = true
+
+	if _, err := os.Stat(credential.Path()); os.IsNotExist(err) {
+		return nil
 	}
 
-	masterPwd, err := ui.Password("Enter master password")
+	masterPwd, err := c.readMasterPassword("Enter master password")
 	if err != nil {
-		return nil, fmt.Errorf("failed to enter master password: %w", err)
+		return nil
 	}
-	return credential.Load(masterPwd)
+	store, err := credential.Load(masterPwd)
+	if err != nil {
+		fmt.Fprintf(c.Err, "Error: Failed to load password store: %v\n", err)
+		return nil
+	}
+	c.store = store
+	return store
+}
+
+// saveStore returns a writable store for this invocation, reusing the unlocked
+// one when it exists. A save therefore never asks for the master password a
+// second time, and a first-time setup asks once instead of twice.
+func (c *CLI) saveStore() (passwordStore, error) {
+	if store := c.openStore(); store != nil {
+		return store, nil
+	}
+
+	// Either the store does not exist yet, or unlocking failed. Creating one is
+	// only correct in the first case, so re-check the file before prompting.
+	if _, err := os.Stat(credential.Path()); !os.IsNotExist(err) {
+		if c.store != nil {
+			return c.store, nil
+		}
+		return nil, fmt.Errorf("password store is not unlocked")
+	}
+
+	fmt.Fprintln(c.Out, "First time setup: Please set a master password for encryption")
+	masterPwd, err := c.readMasterPassword("Set master password")
+	if err != nil {
+		return nil, fmt.Errorf("failed to set master password: %w", err)
+	}
+	confirmPwd, err := c.readMasterPassword("Confirm master password")
+	if err != nil {
+		return nil, fmt.Errorf("failed to confirm master password: %w", err)
+	}
+	if masterPwd != confirmPwd {
+		return nil, fmt.Errorf("passwords do not match")
+	}
+	store, err := credential.Load(masterPwd)
+	if err != nil {
+		return nil, err
+	}
+	c.store = store
+	c.storeOpened = true
+	return store, nil
 }
 
 func (c *CLI) loadPrivateKey(path string) (ssh.Signer, error) {
@@ -296,23 +360,6 @@ func (c *CLI) loadPrivateKey(path string) (ssh.Signer, error) {
 	}
 
 	return ssh.ParsePrivateKeyWithPassphrase(key, []byte(passphrase))
-}
-
-func (c *CLI) loadSavedPasswords() *credential.Store {
-	path := credential.Path()
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return &credential.Store{Passwords: make(map[string]string)}
-	}
-	masterPwd, err := ui.Password("Enter master password")
-	if err != nil {
-		return &credential.Store{Passwords: make(map[string]string)}
-	}
-	store, err := credential.Load(masterPwd)
-	if err != nil {
-		fmt.Fprintf(c.Err, "Error: Failed to load password store: %v\n", err)
-		return &credential.Store{Passwords: make(map[string]string)}
-	}
-	return store
 }
 
 // defaultKeyNames are the keys sshgo falls back to when no IdentityFile is set.

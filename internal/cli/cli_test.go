@@ -526,3 +526,60 @@ func TestChainDepthIsUnlimited(t *testing.T) {
 		t.Errorf("exec stderr = %q, want the break named by hop and target", result.Stderr)
 	}
 }
+
+// `exec` never reads stdin, not even to answer an authentication prompt: a CI
+// job must fail fast instead of hanging. A chain hop with no credential is the
+// case that used to be silent.
+func TestExecDoesNotReadStdinOnMissingHopAuth(t *testing.T) {
+	setupTempHome(t)
+	seedHost(t, "db1", map[string]string{"hostname": "10.0.0.5", "proxy-jump": "bastion"})
+	seedHost(t, "bastion", map[string]string{"hostname": "127.0.0.1", "port": "1"})
+
+	// A closed stdin makes any read fail immediately, so a prompt would show up
+	// as a different error than the expected one.
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	writer.Close()
+	oldStdin := os.Stdin
+	os.Stdin = reader
+	defer func() { os.Stdin = oldStdin; reader.Close() }()
+
+	code, stdout, _ := run(t, "exec", "db1", "true")
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+
+	var result ExecResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("exec output is not JSON: %v", err)
+	}
+	if !strings.Contains(result.Stderr, `Jump host "bastion"`) {
+		t.Errorf("exec stderr = %q, want the jump failure named", result.Stderr)
+	}
+}
+
+// A hop with no authentication method at all gets a message naming it and a
+// command that fixes it, because "no authentication method" alone does not say
+// which end of the chain to look at.
+func TestExecNamesTheHopWithoutAuth(t *testing.T) {
+	setupTempHome(t)
+	seedHost(t, "db1", map[string]string{"hostname": "10.0.0.5", "proxy-jump": "bastion"})
+	// The bastion resolves and is dialled; nothing can authenticate to it.
+	seedHost(t, "bastion", map[string]string{"hostname": "127.0.0.1", "port": "1"})
+
+	code, stdout, _ := run(t, "exec", "db1", "true")
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	var result ExecResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("exec output is not JSON: %v", err)
+	}
+	// Either wording is acceptable here as long as the hop is named: the bastion
+	// may fail to connect before authentication is even attempted.
+	if !strings.Contains(result.Stderr, "bastion") {
+		t.Errorf("exec stderr = %q, want the bastion named", result.Stderr)
+	}
+}

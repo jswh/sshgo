@@ -165,6 +165,10 @@ func execDialError(err error) string {
 	if errors.As(err, &jumpNoAuth) {
 		return jumpNoAuth.Error()
 	}
+	var targetNoAuth *connect.TargetNoAuthError
+	if errors.As(err, &targetNoAuth) {
+		return targetNoAuth.Error()
+	}
 	if errors.Is(err, connect.ErrNoAuthMethod) {
 		return connect.ErrNoAuthMethod.Error()
 	}

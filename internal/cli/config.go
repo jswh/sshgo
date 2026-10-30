@@ -162,7 +162,7 @@ func (c *CLI) runSetSudoPassword(args []string) int {
 		return 1
 	}
 
-	store, err := c.initPasswordStore()
+	store, err := c.saveStore()
 	if err != nil {
 		fmt.Fprintf(c.Err, "Failed to init password store: %v\n", err)
 		return 1

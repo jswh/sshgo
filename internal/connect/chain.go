@@ -81,6 +81,21 @@ func (e *JumpNoAuthError) Error() string {
 		e.Hop.Name, e.Hop.Name)
 }
 
+// TargetNoAuthError reports a target with no authentication method at the end of
+// a chain. Single-hop Hosts keep ErrNoAuthMethod verbatim; in a chain the message
+// has to name the end that needs fixing, otherwise the user cannot tell whether
+// the bastion or the target is the problem.
+type TargetNoAuthError struct{ Hop host.Resolved }
+
+func (e *TargetNoAuthError) Error() string {
+	return fmt.Sprintf("Host %q has no authentication method. Save one: sshgo config set-password %s",
+		e.Hop.Name, e.Hop.Name)
+}
+
+// Unwrap keeps errors.Is(err, ErrNoAuthMethod) true, so callers that only care
+// about the category do not need to know about the chain.
+func (e *TargetNoAuthError) Unwrap() error { return ErrNoAuthMethod }
+
 // Resolver resolves one addressed string into a dialable Host. host.Resolve is
 // the production implementation; tests inject a fake so chain semantics can be
 // exercised without touching the filesystem or a real sshd.
@@ -207,6 +222,11 @@ func Chain(target host.Resolved, auth Authenticator, opts Options) (*ssh.Client,
 	client, err := dialHop(previous, target, auth, opts)
 	if err != nil {
 		cleanup()
+		// Only a chained target is named: a single-hop Host keeps the frozen
+		// wording its callers and the e2e suite already assert on.
+		if len(hops) > 0 && errors.Is(err, ErrNoAuthMethod) {
+			return nil, nil, &TargetNoAuthError{Hop: target}
+		}
 		return nil, nil, err
 	}
 	clients = append(clients, client)
