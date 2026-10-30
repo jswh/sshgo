@@ -9,14 +9,13 @@
 ## 结构
 
 ```
-├── main.go            # 子命令分发 + 无参交互选择 + legacy 模式 `sshgo <host> [cmd]`
-├── exec.go            # exec：结构化 JSON 输出 / --raw 原始流 / --sudo
-├── info.go            # info：非敏感的连接详情（JSON + 人类可读文本）
-├── config.go          # config：Host 元数据 CRUD、`config import`、set-sudo-password
-├── password.go        # ~/.sshgo_passwords 的 AES-GCM 加解密与主口令
-├── update.go          # update：用 HTTP 重定向发现最新 release tag（避开 API 限流）后替换自身
-├── types.go           # HostMeta / LocalConfig 等落盘结构
-├── version.go         # main.version，构建期由 -ldflags -X 注入，开发构建默认 "dev"
+├── main.go            # 仅 os.Exit(cli.Run(...)) + version 变量（-ldflags -X main.version 注入）
+├── internal/cli/      # 子命令分发、帮助文案、退出码、交互选择、两套认证策略（interactiveAuth / execAuth）
+├── internal/host/     # Host 元数据与本地配置、CRUD、Source 推导、解析入口 Resolved（含 CredKeys）
+├── internal/credential/ # ~/.sshgo_passwords：AES-GCM + argon2id，Save/Load，按有序键序列查找
+├── internal/sshconfig/  # ~/.ssh/config 导入快照的纯函数 + 配置适配器
+├── internal/connect/    # 唯一拨号点 Dial + 会话（PTY / 捕获执行）；不依赖 ui/os/term
+├── internal/update/     # 自更新，版本号由调用方传入
 ├── internal/ui/       # 纯 bufio.Scanner + x/term 的交互层（替换 promptui 而来，见「硬性约束」）
 ├── CONTEXT.md         # 领域术语表（角色 / 概念 / _Avoid_ 反例）
 ├── docs/adr/          # 架构决策记录（目前仅 0001）
@@ -25,6 +24,13 @@
 ├── test/              # e2e：Dockerfile（sshd + sudoers）+ setup.sh
 └── .github/workflows/release.yml  # tag v* 触发 6 平台交叉编译 + Release
 ```
+
+### 分层约定
+
+- **`internal/cli` 是唯一知道用户可见文案的包**：帮助文本、错误文案、退出码、进度行都在这里；其他包只返回类型化错误（`host.ErrHostNotFound` 等）或原文案由 cli 拼装（`connect.Error.Op`）。
+- **`internal/connect` 是唯一拨号点**：认证*策略*由 cli 注入 `Authenticator`，`connect` 只负责拨号与会话。因此 `connect` 不 import `ui`/`os`/`term`，可用假策略纯单测整条路径（`internal/connect/connect_test.go` 内含进程内 sshd）。
+- **`internal/host` 是单机事实的唯一权威**：它不认识「链」；Credential Key 序列在 `host` 构造，`credential` 只消费 `[]string`。
+- **`internal/update` 不读全局版本变量**：版本号是入参，根包 `version` 只用于 `-ldflags -X main.version` 注入与传给 `cli.Run`。
 
 ## 领域要点（细则见 `CONTEXT.md`）
 
@@ -42,7 +48,7 @@
 ```bash
 go build -o sshgo .                 # 本地开发
 go build -ldflags="-s -w -X main.version=vX.Y.Z" -o sshgo .   # 版本注入（与 CI 一致）
-go test ./...                       # 单元测试（update_test.go）
+go test ./...                       # 单元测试（各 internal 包自带；cli 内有文案/JSON 金测试）
 ./test/setup.sh                     # e2e，依赖 Docker（test/Dockerfile 起 sshd + sudoers）
 ```
 
@@ -56,9 +62,3 @@ go test ./...                       # 单元测试（update_test.go）
 - **ADR-0001 不可静默推翻**：把元数据与口令合并成一个文件属于安全模型变更，需在提案里显式指出冲突并新增 ADR。
 - **术语用 `CONTEXT.md` 的说法**：不要用它明确 `_Avoid_` 掉的「run / execute / status / settings / nickname」等说法。
 - 输出、日志、错误信息里**不得出现**口令、passphrase 私钥路径等敏感值。
-
-## 已知问题（本次初始化时记录，待 owner 决定）
-
-- **`main` 在干净 clone 上构建不过**：`go.mod` 里有 `replace golang.org/x/term v0.44.0 => ./.deps/golang.org/x/term`，而 `.deps/` 被 `.gitignore` 排除 ⇒ `go build ./...` 与 `go mod tidy` 都报 `replacement directory ./.deps/golang.org/x/term does not exist`。该 replace 由最新提交 `0eaefab` 引入。删掉这行改用上游 `x/term v0.44.0` 后，构建与 `go test ./...` 均通过（已在临时副本验证，未改动仓库）。
-- 上述问题的暴露面：`release.yml` 的「Tidy modules」步骤会失败，但该 workflow 只在打 tag 时跑，而 `0eaefab`/`4302be6` 尚未进任何 release（最新 tag 停在 `v0.5.0`）⇒ **下次发版前需要先处理它**。
-- **倾向结论（已核，未动仓库）**：上游 `golang.org/x/term@v0.44.0` 里**没有任何 `func init()`，也不引用 `kernel32`/`AllocConsole`**（在 module cache 里 grep 证实）⇒ 这条 replace 对「Windows 控制台窗口」问题并非必需（真正的元凶 `chzyer/readline` 已在 `0eaefab` 随 promptui 一起移除）。**最小修法＝删掉 `go.mod` 那行 `replace`**，本地已验证 build 与测试都过。
