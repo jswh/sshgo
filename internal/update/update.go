@@ -47,13 +47,7 @@ func getDownloadURL(tag string) string {
 // the process exit code and writes user-facing output to stdout/stderr.
 func Run(currentVersion string, args []string, stdout, stderr io.Writer) int {
 	if len(args) >= 1 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Fprintln(stdout, "Usage: sshgo update")
-		fmt.Fprintln(stdout)
-		fmt.Fprintln(stdout, "Check for updates and replace the current binary with the latest release.")
-		fmt.Fprintln(stdout, "The latest version is fetched from GitHub releases.")
-		fmt.Fprintln(stdout)
-		fmt.Fprintln(stdout, "Environment:")
-		fmt.Fprintln(stdout, "  SSHGO_UPDATE_SERVER  Override the update server URL (for testing)")
+		printHelp(stdout)
 		return 0
 	}
 
@@ -63,26 +57,46 @@ func Run(currentVersion string, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	return selfUpdate(currentVersion, stdout, stderr)
+}
+
+// selfUpdate performs the check, download, and replacement.
+func selfUpdate(currentVersion string, stdout, stderr io.Writer) int {
 	latestVersion, err := getLatestReleaseTag()
 	if err != nil {
 		fmt.Fprintf(stderr, "Failed to check for updates: %v\n", err)
 		return 1
 	}
 
-	downloadURL := getDownloadURL(latestVersion)
-
-	if currentVersion != devVersion {
-		cmp := semverCompare(currentVersion, latestVersion)
-		if cmp >= 0 {
-			fmt.Fprintf(stdout, "Already up to date (%s)\n", currentVersion)
-			return 0
-		}
-		fmt.Fprintf(stdout, "Updating from %s to %s ...\n", currentVersion, latestVersion)
-	} else {
-		fmt.Fprintf(stdout, "Development build detected. Downloading latest release %s ...\n", latestVersion)
+	if code, proceed := announceVersion(currentVersion, latestVersion, stdout); !proceed {
+		return code
 	}
 
-	// Download to a temp file
+	return downloadAndReplace(latestVersion, stdout, stderr)
+}
+
+// announceVersion reports what is about to happen. The boolean is false when the
+// run is already over, in which case code is the exit code to return.
+func announceVersion(currentVersion, latestVersion string, stdout io.Writer) (int, bool) {
+	if currentVersion == devVersion {
+		fmt.Fprintf(stdout, "Development build detected. Downloading latest release %s ...\n", latestVersion)
+		return 0, true
+	}
+
+	if semverCompare(currentVersion, latestVersion) >= 0 {
+		fmt.Fprintf(stdout, "Already up to date (%s)\n", currentVersion)
+		return 0, false
+	}
+
+	fmt.Fprintf(stdout, "Updating from %s to %s ...\n", currentVersion, latestVersion)
+	return 0, true
+}
+
+// downloadAndReplace fetches the release artifact for this OS/arch and swaps it
+// in for the running binary.
+func downloadAndReplace(latestVersion string, stdout, stderr io.Writer) int {
+	downloadURL := getDownloadURL(latestVersion)
+
 	tmpFile, err := os.CreateTemp("", "sshgo-*")
 	if err != nil {
 		fmt.Fprintf(stderr, "Failed to create temp file: %v\n", err)
@@ -105,29 +119,52 @@ func Run(currentVersion string, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Get current binary path
-	currentExe, err := os.Executable()
+	currentExe, err := currentExecutablePath()
 	if err != nil {
 		fmt.Fprintf(stderr, "Failed to determine current executable path: %v\n", err)
 		return 1
 	}
-	resolvedExe, err := filepath.EvalSymlinks(currentExe)
-	if err == nil {
-		currentExe = resolvedExe
-	}
 
-	// Replace binary
 	if err := replaceBinary(tmpPath, currentExe); err != nil {
 		fmt.Fprintf(stderr, "Failed to replace binary: %v\n", err)
-		fmt.Fprintf(stdout, "\nDownload saved to: %s\n", tmpPath)
-		fmt.Fprintf(stdout, "You can manually install it:\n")
-		fmt.Fprintf(stdout, "  sudo mv %s %s\n", tmpPath, currentExe)
-		fmt.Fprintf(stdout, "  sudo chmod +x %s\n", currentExe)
+		printManualInstall(stdout, tmpPath, currentExe)
 		return 1
 	}
 
 	fmt.Fprintf(stdout, "Successfully updated to %s\n", latestVersion)
 	return 0
+}
+
+// currentExecutablePath resolves the running binary through any symlinks.
+func currentExecutablePath() (string, error) {
+	currentExe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(currentExe); err == nil {
+		currentExe = resolved
+	}
+	return currentExe, nil
+}
+
+// printManualInstall tells the user how to finish an update that could not
+// replace the binary in place.
+func printManualInstall(stdout io.Writer, tmpPath, currentExe string) {
+	fmt.Fprintf(stdout, "\nDownload saved to: %s\n", tmpPath)
+	fmt.Fprintf(stdout, "You can manually install it:\n")
+	fmt.Fprintf(stdout, "  sudo mv %s %s\n", tmpPath, currentExe)
+	fmt.Fprintf(stdout, "  sudo chmod +x %s\n", currentExe)
+}
+
+// printHelp prints the `update` usage block.
+func printHelp(stdout io.Writer) {
+	fmt.Fprintln(stdout, "Usage: sshgo update")
+	fmt.Fprintln(stdout)
+	fmt.Fprintln(stdout, "Check for updates and replace the current binary with the latest release.")
+	fmt.Fprintln(stdout, "The latest version is fetched from GitHub releases.")
+	fmt.Fprintln(stdout)
+	fmt.Fprintln(stdout, "Environment:")
+	fmt.Fprintln(stdout, "  SSHGO_UPDATE_SERVER  Override the update server URL (for testing)")
 }
 
 // getLatestReleaseTag follows the /releases/latest redirect to extract the

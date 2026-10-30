@@ -1,4 +1,6 @@
-// Package term provides interactive terminal input functions.
+// Package ui provides interactive terminal input: selection lists, plain and
+// masked prompts, and the terminal predicates callers branch on.
+//
 // It replaces promptui to avoid the readline package's Windows console init(),
 // which would otherwise affect all commands including --help.
 package ui

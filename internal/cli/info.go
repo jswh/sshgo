@@ -95,7 +95,7 @@ func detectAuthMethods(identityFile string) []string {
 
 	// Check identity file exists
 	if identityFile != "" {
-		identityFile = expandIdentityFile(identityFile)
+		identityFile = host.ExpandPath(identityFile)
 		if _, err := os.Stat(identityFile); err == nil {
 			methods = append(methods, "IdentityFile (key)")
 		}

@@ -296,9 +296,6 @@ func (c *CLI) loadSavedPasswords() *credential.Store {
 	return store
 }
 
-// expandIdentityFile is host.ExpandPath, kept local so auth.go stays readable.
-func expandIdentityFile(path string) string { return host.ExpandPath(path) }
-
 // defaultKeyNames are the keys sshgo falls back to when no IdentityFile is set.
 var defaultKeyNames = []string{"id_rsa", "id_ed25519", "id_ecdsa"}
 

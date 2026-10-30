@@ -12,19 +12,7 @@ import (
 // runConfig dispatches the config subcommand.
 func (c *CLI) runConfig(args []string) int {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintln(c.Out, "Usage: sshgo config <command> [args]")
-		fmt.Fprintln(c.Out)
-		fmt.Fprintln(c.Out, "Commands:")
-		fmt.Fprintln(c.Out, "  list                          List all hosts with metadata")
-		fmt.Fprintln(c.Out, "  get <host> [key]              Get metadata")
-		fmt.Fprintln(c.Out, "  set <host> <key> <value>      Set metadata")
-		fmt.Fprintln(c.Out, "  unset <host> [key]            Remove metadata or entire host entry")
-		fmt.Fprintln(c.Out, "  remove <host>                 Remove an entire host entry (same as unset <host>)")
-		fmt.Fprintln(c.Out, "  import                        Import hosts from ~/.ssh/config")
-		fmt.Fprintln(c.Out, "  set-sudo-password <host>      Set sudo password for a host")
-		fmt.Fprintln(c.Out, "  find --tag <tag>              Find hosts by tag")
-		fmt.Fprintln(c.Out)
-		fmt.Fprintln(c.Out, "Metadata keys: alias, notes, tags, connection-priority, hostname, port, user, identity-file, proxy-jump")
+		c.printConfigHelp()
 		return 0
 	}
 
@@ -36,105 +24,117 @@ func (c *CLI) runConfig(args []string) int {
 
 	switch cmd := args[0]; cmd {
 	case "list":
-		hosts := cfg.List()
-		if len(hosts) == 0 {
-			fmt.Fprintln(c.Out, "No hosts in local config")
-			return 0
-		}
-		for _, name := range hosts {
-			meta := cfg.Hosts[name]
-			fmt.Fprintf(c.Out, "%s:\n", name)
-			fmt.Fprintln(c.Out, "  "+strings.ReplaceAll(cfg.FormatMeta(meta), "\n", "\n  "))
-		}
-		return 0
-
+		return c.runConfigList(cfg)
 	case "get":
-		if len(args) < 2 {
-			fmt.Fprintln(c.Err, "Usage: sshgo config get <host> [key]")
-			return 1
-		}
-		host := args[1]
-		key := ""
-		if len(args) > 2 {
-			key = args[2]
-		}
-		val, err := cfg.Get(host, key)
-		if err != nil {
-			fmt.Fprintf(c.Err, "Error: %v\n", err)
-			return 1
-		}
-		fmt.Fprintln(c.Out, val)
-		return 0
-
+		return c.runConfigGet(cfg, args[1:])
 	case "set":
-		if len(args) < 4 {
-			fmt.Fprintln(c.Err, "Usage: sshgo config set <host> <key> <value>")
-			return 1
-		}
-		host, key, value := args[1], args[2], args[3]
-		if err := cfg.Set(host, key, value); err != nil {
-			fmt.Fprintf(c.Err, "Error: %v\n", err)
-			return 1
-		}
-		fmt.Fprintf(c.Out, "Set %s[%s] = %s\n", host, key, value)
-		return 0
-
+		return c.runConfigSet(cfg, args[1:])
 	case "unset":
-		if len(args) < 2 {
-			fmt.Fprintln(c.Err, "Usage: sshgo config unset <host> [key]")
-			return 1
-		}
-		host := args[1]
-		key := ""
-		if len(args) > 2 {
-			key = args[2]
-		}
-		if err := cfg.Unset(host, key); err != nil {
-			fmt.Fprintf(c.Err, "Error: %v\n", err)
-			return 1
-		}
-		fmt.Fprintf(c.Out, "Unset %s[%s]\n", host, key)
-		return 0
-
+		return c.runConfigUnset(cfg, args[1:])
 	case "remove":
-		if len(args) < 2 {
-			fmt.Fprintln(c.Err, "Usage: sshgo config remove <host>")
-			return 1
-		}
-		host := args[1]
-		if err := cfg.Remove(host); err != nil {
-			fmt.Fprintf(c.Err, "Error: %v\n", err)
-			return 1
-		}
-		fmt.Fprintf(c.Out, "Removed %s\n", host)
-		return 0
-
+		return c.runConfigRemove(cfg, args[1:])
 	case "find":
-		if len(args) < 3 || args[1] != "--tag" {
-			fmt.Fprintln(c.Err, "Usage: sshgo config find --tag <tag>")
-			return 1
-		}
-		tag := args[2]
-		hosts := cfg.FindByTag(tag)
-		if len(hosts) == 0 {
-			fmt.Fprintf(c.Out, "No hosts with tag %q\n", tag)
-			return 0
-		}
-		for _, name := range hosts {
-			fmt.Fprintln(c.Out, name)
-		}
-		return 0
-
+		return c.runConfigFind(cfg, args[1:])
 	case "import":
 		return c.runConfigImport()
-
 	case "set-sudo-password":
 		return c.runSetSudoPassword(args[1:])
-
 	default:
 		fmt.Fprintf(c.Err, "Unknown config command: %q\n", cmd)
 		return 1
 	}
+}
+
+func (c *CLI) runConfigList(cfg *host.LocalConfig) int {
+	names := cfg.List()
+	if len(names) == 0 {
+		fmt.Fprintln(c.Out, "No hosts in local config")
+		return 0
+	}
+	for _, name := range names {
+		fmt.Fprintf(c.Out, "%s:\n", name)
+		fmt.Fprintln(c.Out, "  "+strings.ReplaceAll(cfg.FormatMeta(cfg.Hosts[name]), "\n", "\n  "))
+	}
+	return 0
+}
+
+func (c *CLI) runConfigGet(cfg *host.LocalConfig, args []string) int {
+	if len(args) < 1 {
+		fmt.Fprintln(c.Err, "Usage: sshgo config get <host> [key]")
+		return 1
+	}
+	key := ""
+	if len(args) > 1 {
+		key = args[1]
+	}
+	val, err := cfg.Get(args[0], key)
+	if err != nil {
+		fmt.Fprintf(c.Err, "Error: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(c.Out, val)
+	return 0
+}
+
+func (c *CLI) runConfigSet(cfg *host.LocalConfig, args []string) int {
+	if len(args) < 3 {
+		fmt.Fprintln(c.Err, "Usage: sshgo config set <host> <key> <value>")
+		return 1
+	}
+	hostName, key, value := args[0], args[1], args[2]
+	if err := cfg.Set(hostName, key, value); err != nil {
+		fmt.Fprintf(c.Err, "Error: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(c.Out, "Set %s[%s] = %s\n", hostName, key, value)
+	return 0
+}
+
+func (c *CLI) runConfigUnset(cfg *host.LocalConfig, args []string) int {
+	if len(args) < 1 {
+		fmt.Fprintln(c.Err, "Usage: sshgo config unset <host> [key]")
+		return 1
+	}
+	key := ""
+	if len(args) > 1 {
+		key = args[1]
+	}
+	if err := cfg.Unset(args[0], key); err != nil {
+		fmt.Fprintf(c.Err, "Error: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(c.Out, "Unset %s[%s]\n", args[0], key)
+	return 0
+}
+
+func (c *CLI) runConfigRemove(cfg *host.LocalConfig, args []string) int {
+	if len(args) < 1 {
+		fmt.Fprintln(c.Err, "Usage: sshgo config remove <host>")
+		return 1
+	}
+	if err := cfg.Remove(args[0]); err != nil {
+		fmt.Fprintf(c.Err, "Error: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(c.Out, "Removed %s\n", args[0])
+	return 0
+}
+
+func (c *CLI) runConfigFind(cfg *host.LocalConfig, args []string) int {
+	if len(args) < 2 || args[0] != "--tag" {
+		fmt.Fprintln(c.Err, "Usage: sshgo config find --tag <tag>")
+		return 1
+	}
+	tag := args[1]
+	names := cfg.FindByTag(tag)
+	if len(names) == 0 {
+		fmt.Fprintf(c.Out, "No hosts with tag %q\n", tag)
+		return 0
+	}
+	for _, name := range names {
+		fmt.Fprintln(c.Out, name)
+	}
+	return 0
 }
 
 // runSetSudoPassword prompts for a sudo password and saves it to the encrypted store.
@@ -210,4 +210,21 @@ func (c *CLI) runConfigImport() int {
 	fmt.Fprintln(c.Out, "Re-running `sshgo config import` refreshes connection details from ~/.ssh/config;")
 	fmt.Fprintln(c.Out, "hosts deleted there are not removed here.")
 	return 0
+}
+
+// printConfigHelp prints the `config` usage block.
+func (c *CLI) printConfigHelp() {
+	fmt.Fprintln(c.Out, "Usage: sshgo config <command> [args]")
+	fmt.Fprintln(c.Out)
+	fmt.Fprintln(c.Out, "Commands:")
+	fmt.Fprintln(c.Out, "  list                          List all hosts with metadata")
+	fmt.Fprintln(c.Out, "  get <host> [key]              Get metadata")
+	fmt.Fprintln(c.Out, "  set <host> <key> <value>      Set metadata")
+	fmt.Fprintln(c.Out, "  unset <host> [key]            Remove metadata or entire host entry")
+	fmt.Fprintln(c.Out, "  remove <host>                 Remove an entire host entry (same as unset <host>)")
+	fmt.Fprintln(c.Out, "  import                        Import hosts from ~/.ssh/config")
+	fmt.Fprintln(c.Out, "  set-sudo-password <host>      Set sudo password for a host")
+	fmt.Fprintln(c.Out, "  find --tag <tag>              Find hosts by tag")
+	fmt.Fprintln(c.Out)
+	fmt.Fprintln(c.Out, "Metadata keys: alias, notes, tags, connection-priority, hostname, port, user, identity-file, proxy-jump")
 }
