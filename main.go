@@ -51,8 +51,6 @@ func main() {
 		handleUpdate(args[1:])
 	default:
 		// Legacy mode: sshgo <host> [command]
-		passwords := &PasswordStore{Passwords: make(map[string]string)}
-
 		var command string
 		if len(args) > 1 {
 			command = strings.Join(args[1:], " ")
@@ -63,7 +61,7 @@ func main() {
 			exitResolveError(err)
 		}
 
-		connectToHost(target, passwords, command)
+		connectToHost(target, command)
 	}
 }
 
@@ -102,7 +100,6 @@ func printHelp() {
 }
 
 func interactiveSelect() {
-	passwords := &PasswordStore{Passwords: make(map[string]string)}
 	hosts := buildHostList()
 
 	if len(hosts) == 0 {
@@ -124,7 +121,7 @@ func interactiveSelect() {
 
 	idx, _, err := ui.Select("Select host to connect", items)
 	if err != nil {
-		fmt.Printf("Selection failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: Selection failed: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -133,7 +130,7 @@ func interactiveSelect() {
 	if err != nil {
 		exitResolveError(err)
 	}
-	connectToHost(target, passwords, "")
+	connectToHost(target, "")
 }
 
 // exitResolveError reports a resolution failure on stderr and exits 1. Every
@@ -184,7 +181,7 @@ func buildHostList() []hostInfo {
 	return result
 }
 
-func connectToHost(target resolvedTarget, passwords *PasswordStore, command string) {
+func connectToHost(target resolvedTarget, command string) {
 	hostname, port, user, identityFile := resolveConnection(target.Info)
 
 	// 1. Collect all key signers (agent + file) for a single publickey method
@@ -200,12 +197,12 @@ func connectToHost(target resolvedTarget, passwords *PasswordStore, command stri
 	}
 
 	// 2. Build non-agent auth methods (file signers + passwords)
-	fileSigners, extraMethods, err := buildAuthMethods(target.Cred, identityFile, passwords)
+	fileSigners, extraMethods, err := buildAuthMethods(target.Cred, identityFile)
 	if err != nil {
 		if agentConn != nil {
 			agentConn.Close()
 		}
-		fmt.Printf("Authentication failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: Authentication failed: %v\n", err)
 		os.Exit(1)
 	}
 	allSigners = append(allSigners, fileSigners...)
@@ -228,14 +225,14 @@ func connectToHost(target resolvedTarget, passwords *PasswordStore, command stri
 		agentConn.Close() // safe to close after auth completes
 	}
 	if err != nil {
-		fmt.Printf("Connection failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: Connection failed: %v\n", err)
 		os.Exit(1)
 	}
 	defer client.Close()
 
 	session, err := client.NewSession()
 	if err != nil {
-		fmt.Printf("Failed to create session: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: Failed to create session: %v\n", err)
 		os.Exit(1)
 	}
 	defer session.Close()
@@ -258,7 +255,7 @@ func connectToHost(target resolvedTarget, passwords *PasswordStore, command stri
 		}
 
 		if err := session.RequestPty("xterm-256color", height, width, modes); err != nil {
-			fmt.Printf("Failed to request PTY: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: Failed to request PTY: %v\n", err)
 			os.Exit(1)
 		}
 	}
@@ -278,7 +275,7 @@ func connectToHost(target resolvedTarget, passwords *PasswordStore, command stri
 	} else {
 		// Start interactive shell
 		if err := session.Shell(); err != nil {
-			fmt.Printf("Failed to start shell: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error: Failed to start shell: %v\n", err)
 			os.Exit(1)
 		}
 
@@ -291,7 +288,7 @@ func connectToHost(target resolvedTarget, passwords *PasswordStore, command stri
 // buildAuthMethods collects file-based key signers plus password methods for an
 // interactive login. Passwords are looked up and saved by Credential Key, so an
 // entry saved for the addressed name is found here as well as by `exec`.
-func buildAuthMethods(cred credentialTarget, identityFile string, passwords *PasswordStore) ([]ssh.Signer, []ssh.AuthMethod, error) {
+func buildAuthMethods(cred credentialTarget, identityFile string) ([]ssh.Signer, []ssh.AuthMethod, error) {
 	var fileSigners []ssh.Signer
 	var extraMethods []ssh.AuthMethod
 
@@ -315,8 +312,10 @@ func buildAuthMethods(cred credentialTarget, identityFile string, passwords *Pas
 		}
 	}
 
-	// 3. Check saved passwords
-	if savedPwd, ok := lookupSavedPassword(passwords, cred.Keys); ok {
+	// 3. Check saved passwords. The store is loaded here rather than passed in
+	// because loading may prompt for the master password, which should only
+	// happen when key auth is not enough.
+	if savedPwd, ok := lookupSavedPassword(loadSavedPasswords(), cred.Keys); ok {
 		extraMethods = append(extraMethods, ssh.Password(savedPwd))
 		fmt.Fprintln(os.Stderr, "Using saved password")
 		return fileSigners, extraMethods, nil
@@ -381,7 +380,7 @@ func loadSavedPasswords() *PasswordStore {
 	}
 	store, err := LoadPasswordStore(masterPwd)
 	if err != nil {
-		fmt.Printf("Failed to load password store: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: Failed to load password store: %v\n", err)
 		return &PasswordStore{Passwords: make(map[string]string)}
 	}
 	return store
