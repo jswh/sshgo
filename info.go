@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/crypto/ssh/agent"
 
+	"sshgo/internal/credential"
 	"sshgo/internal/host"
 )
 
@@ -110,7 +111,7 @@ func detectAuthMethods(identityFile string) []string {
 	}
 
 	// Check saved passwords (without decrypting, just check file existence)
-	passPath := getPasswordStorePath()
+	passPath := credential.Path()
 	if _, err := os.Stat(passPath); err == nil {
 		// File exists; may or may not have a password for this host
 		methods = append(methods, "Password store (encrypted)")

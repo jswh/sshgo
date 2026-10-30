@@ -1,4 +1,4 @@
-package main
+package credential
 
 import "testing"
 
@@ -9,7 +9,7 @@ import "testing"
 func TestLookupSudoPasswordUsesHostKey(t *testing.T) {
 	setupTempHome(t)
 
-	store, err := LoadPasswordStore("master-pass")
+	store, err := Load("master-pass")
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -18,9 +18,9 @@ func TestLookupSudoPasswordUsesHostKey(t *testing.T) {
 	}
 
 	keys := []string{"acchost", "127.0.0.1"}
-	got, ok := lookupSudoPassword(store, keys)
+	got, ok := LookupSudoPassword(store, keys)
 	if !ok {
-		t.Fatalf("lookupSudoPassword(%v) missed a password saved under the host key", keys)
+		t.Fatalf("LookupSudoPassword(%v) missed a password saved under the host key", keys)
 	}
 	if got != "host-key-pw" {
 		t.Error("lookupSudoPassword returned a different password than the one stored")
@@ -30,7 +30,7 @@ func TestLookupSudoPasswordUsesHostKey(t *testing.T) {
 func TestLookupSudoPasswordFallsBackToHostname(t *testing.T) {
 	setupTempHome(t)
 
-	store, err := LoadPasswordStore("master-pass")
+	store, err := Load("master-pass")
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -40,9 +40,9 @@ func TestLookupSudoPasswordFallsBackToHostname(t *testing.T) {
 	}
 
 	keys := []string{"acchost", "127.0.0.1"}
-	got, ok := lookupSudoPassword(store, keys)
+	got, ok := LookupSudoPassword(store, keys)
 	if !ok {
-		t.Fatalf("lookupSudoPassword(%v) missed a legacy hostname-keyed password", keys)
+		t.Fatalf("LookupSudoPassword(%v) missed a legacy hostname-keyed password", keys)
 	}
 	if got != "legacy-pw" {
 		t.Error("lookupSudoPassword returned a different password than the one stored")
@@ -52,7 +52,7 @@ func TestLookupSudoPasswordFallsBackToHostname(t *testing.T) {
 func TestLookupSudoPasswordPrefersHostKeyOverHostname(t *testing.T) {
 	setupTempHome(t)
 
-	store, err := LoadPasswordStore("master-pass")
+	store, err := Load("master-pass")
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -64,9 +64,9 @@ func TestLookupSudoPasswordPrefersHostKeyOverHostname(t *testing.T) {
 	}
 
 	keys := []string{"acchost", "127.0.0.1"}
-	got, ok := lookupSudoPassword(store, keys)
+	got, ok := LookupSudoPassword(store, keys)
 	if !ok {
-		t.Fatalf("lookupSudoPassword(%v) missed the stored password", keys)
+		t.Fatalf("LookupSudoPassword(%v) missed the stored password", keys)
 	}
 	if got != "host-key-pw" {
 		t.Error("lookupSudoPassword preferred the hostname key over the host key")
@@ -78,7 +78,7 @@ func TestLookupSudoPasswordPrefersHostKeyOverHostname(t *testing.T) {
 func TestSudoPasswordSavedUnderAddressedKeyIsFound(t *testing.T) {
 	setupTempHome(t)
 
-	store, err := LoadPasswordStore("master-pass")
+	store, err := Load("master-pass")
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestSudoPasswordSavedUnderAddressedKeyIsFound(t *testing.T) {
 		t.Fatalf("set sudo password: %v", err)
 	}
 
-	got, ok := lookupSudoPassword(store, keys)
+	got, ok := LookupSudoPassword(store, keys)
 	if !ok || got != "prompted-pw" {
 		t.Fatal("a password saved under the first credential key was not found by the lookup")
 	}
@@ -97,7 +97,7 @@ func TestSudoPasswordSavedUnderAddressedKeyIsFound(t *testing.T) {
 func TestLookupSavedPasswordUsesHostKey(t *testing.T) {
 	setupTempHome(t)
 
-	store, err := LoadPasswordStore("master-pass")
+	store, err := Load("master-pass")
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -106,15 +106,15 @@ func TestLookupSavedPasswordUsesHostKey(t *testing.T) {
 	}
 
 	keys := []string{"acchost", "127.0.0.1"}
-	got, ok := lookupSavedPassword(store, keys)
+	got, ok := LookupSavedPassword(store, keys)
 	if !ok {
-		t.Fatalf("lookupSavedPassword(%v) missed a password saved under the host key", keys)
+		t.Fatalf("LookupSavedPassword(%v) missed a password saved under the host key", keys)
 	}
 	if got != "ssh-pw" {
 		t.Error("lookupSavedPassword returned a different password than the one stored")
 	}
 
-	if _, ok := lookupSavedPassword(store, []string{"127.0.0.1"}); ok {
+	if _, ok := LookupSavedPassword(store, []string{"127.0.0.1"}); ok {
 		t.Error("lookupSavedPassword hit a key that was never stored")
 	}
 }

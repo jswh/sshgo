@@ -12,6 +12,7 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/term"
 
+	"sshgo/internal/credential"
 	"sshgo/internal/host"
 	"sshgo/internal/ui"
 )
@@ -126,8 +127,8 @@ func exitResolveError(err error) {
 	os.Exit(1)
 }
 
-func initPasswordStore() (*PasswordStore, error) {
-	path := getPasswordStorePath()
+func initPasswordStore() (*credential.Store, error) {
+	path := credential.Path()
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		fmt.Println("First time setup: Please set a master password for encryption")
 		masterPwd, err := ui.Password("Set master password")
@@ -141,14 +142,14 @@ func initPasswordStore() (*PasswordStore, error) {
 		if masterPwd != confirmPwd {
 			return nil, fmt.Errorf("passwords do not match")
 		}
-		return LoadPasswordStore(masterPwd)
+		return credential.Load(masterPwd)
 	}
 
 	masterPwd, err := ui.Password("Enter master password")
 	if err != nil {
 		return nil, fmt.Errorf("failed to enter master password: %w", err)
 	}
-	return LoadPasswordStore(masterPwd)
+	return credential.Load(masterPwd)
 }
 
 // hostEntry is one row of the interactive host list.
@@ -305,7 +306,7 @@ func buildAuthMethods(target host.Resolved, identityFile string) ([]ssh.Signer, 
 	// 3. Check saved passwords. The store is loaded here rather than passed in
 	// because loading may prompt for the master password, which should only
 	// happen when key auth is not enough.
-	if savedPwd, ok := lookupSavedPassword(loadSavedPasswords(), target.CredKeys); ok {
+	if savedPwd, ok := credential.LookupSavedPassword(loadSavedPasswords(), target.CredKeys); ok {
 		extraMethods = append(extraMethods, ssh.Password(savedPwd))
 		fmt.Fprintln(os.Stderr, "Using saved password")
 		return fileSigners, extraMethods, nil
@@ -359,19 +360,19 @@ func loadPrivateKey(path string) (ssh.Signer, error) {
 	return ssh.ParsePrivateKeyWithPassphrase(key, []byte(passphrase))
 }
 
-func loadSavedPasswords() *PasswordStore {
-	path := getPasswordStorePath()
+func loadSavedPasswords() *credential.Store {
+	path := credential.Path()
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return &PasswordStore{Passwords: make(map[string]string)}
+		return &credential.Store{Passwords: make(map[string]string)}
 	}
 	masterPwd, err := ui.Password("Enter master password")
 	if err != nil {
-		return &PasswordStore{Passwords: make(map[string]string)}
+		return &credential.Store{Passwords: make(map[string]string)}
 	}
-	store, err := LoadPasswordStore(masterPwd)
+	store, err := credential.Load(masterPwd)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to load password store: %v\n", err)
-		return &PasswordStore{Passwords: make(map[string]string)}
+		return &credential.Store{Passwords: make(map[string]string)}
 	}
 	return store
 }

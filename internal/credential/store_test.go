@@ -1,4 +1,4 @@
-package main
+package credential
 
 import (
 	"encoding/base64"
@@ -19,10 +19,10 @@ func setupTempHome(t *testing.T) string {
 	return dir
 }
 
-func TestPasswordStoreRoundtrip(t *testing.T) {
+func TestStoreRoundtrip(t *testing.T) {
 	setupTempHome(t)
 
-	store, err := LoadPasswordStore("master-pass")
+	store, err := Load("master-pass")
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -30,7 +30,7 @@ func TestPasswordStoreRoundtrip(t *testing.T) {
 		t.Fatalf("set password: %v", err)
 	}
 
-	reloaded, err := LoadPasswordStore("master-pass")
+	reloaded, err := Load("master-pass")
 	if err != nil {
 		t.Fatalf("reload store: %v", err)
 	}
@@ -44,10 +44,10 @@ func TestPasswordStoreRoundtrip(t *testing.T) {
 	}
 }
 
-func TestPasswordStoreFileFormat(t *testing.T) {
+func TestStoreFileFormat(t *testing.T) {
 	setupTempHome(t)
 
-	store, err := LoadPasswordStore("master-pass")
+	store, err := Load("master-pass")
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestPasswordStoreFileFormat(t *testing.T) {
 		t.Fatalf("set password: %v", err)
 	}
 
-	data, err := os.ReadFile(getPasswordStorePath())
+	data, err := os.ReadFile(Path())
 	if err != nil {
 		t.Fatalf("read store file: %v", err)
 	}
@@ -104,10 +104,10 @@ func TestPasswordStoreFileFormat(t *testing.T) {
 	}
 }
 
-func TestPasswordStoreWrongMasterPassword(t *testing.T) {
+func TestStoreWrongMasterPassword(t *testing.T) {
 	setupTempHome(t)
 
-	store, err := LoadPasswordStore("correct")
+	store, err := Load("correct")
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -115,15 +115,15 @@ func TestPasswordStoreWrongMasterPassword(t *testing.T) {
 		t.Fatalf("set password: %v", err)
 	}
 
-	if _, err := LoadPasswordStore("wrong"); err == nil {
+	if _, err := Load("wrong"); err == nil {
 		t.Fatal("load with wrong master password succeeded, want error")
 	}
 }
 
-func TestPasswordStoreTamperedCiphertext(t *testing.T) {
+func TestStoreTamperedCiphertext(t *testing.T) {
 	setupTempHome(t)
 
-	store, err := LoadPasswordStore("master-pass")
+	store, err := Load("master-pass")
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestPasswordStoreTamperedCiphertext(t *testing.T) {
 		t.Fatalf("set password: %v", err)
 	}
 
-	path := getPasswordStorePath()
+	path := Path()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read store file: %v", err)
@@ -169,12 +169,12 @@ func TestPasswordStoreTamperedCiphertext(t *testing.T) {
 		t.Fatalf("write tampered store: %v", err)
 	}
 
-	if _, err := LoadPasswordStore("master-pass"); err == nil {
+	if _, err := Load("master-pass"); err == nil {
 		t.Fatal("load of tampered store succeeded, want error")
 	}
 }
 
-func TestPasswordStoreRejectsOldFormat(t *testing.T) {
+func TestStoreRejectsOldFormat(t *testing.T) {
 	home := setupTempHome(t)
 
 	// Shape of the pre-argon2id store: no version/kdf/params fields.
@@ -186,7 +186,7 @@ func TestPasswordStoreRejectsOldFormat(t *testing.T) {
 		t.Fatalf("write old store: %v", err)
 	}
 
-	_, err := LoadPasswordStore("master-pass")
+	_, err := Load("master-pass")
 	if err == nil {
 		t.Fatal("load of old-format store succeeded, want error")
 	}
@@ -196,10 +196,10 @@ func TestPasswordStoreRejectsOldFormat(t *testing.T) {
 	}
 }
 
-func TestPasswordStoreTamperedNonFirstEntry(t *testing.T) {
+func TestStoreTamperedNonFirstEntry(t *testing.T) {
 	setupTempHome(t)
 
-	store, err := LoadPasswordStore("master-pass")
+	store, err := Load("master-pass")
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestPasswordStoreTamperedNonFirstEntry(t *testing.T) {
 
 	// Tamper only b.example.com: map iteration order is random, so every entry
 	// has to be verified for this to fail deterministically.
-	path := getPasswordStorePath()
+	path := Path()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read store file: %v", err)
@@ -243,12 +243,12 @@ func TestPasswordStoreTamperedNonFirstEntry(t *testing.T) {
 		t.Fatalf("write tampered store: %v", err)
 	}
 
-	if _, err := LoadPasswordStore("master-pass"); err == nil {
+	if _, err := Load("master-pass"); err == nil {
 		t.Fatal("load of store with a tampered entry succeeded, want error")
 	}
 }
 
-func TestPasswordStoreRejectsUnknownKDF(t *testing.T) {
+func TestStoreRejectsUnknownKDF(t *testing.T) {
 	home := setupTempHome(t)
 
 	unknown := `{
@@ -262,12 +262,12 @@ func TestPasswordStoreRejectsUnknownKDF(t *testing.T) {
 		t.Fatalf("write store with unknown kdf: %v", err)
 	}
 
-	if _, err := LoadPasswordStore("master-pass"); err == nil {
+	if _, err := Load("master-pass"); err == nil {
 		t.Fatal("load of store with unknown kdf succeeded, want error")
 	}
 }
 
-func TestPasswordStoreRejectsInvalidKDFParams(t *testing.T) {
+func TestStoreRejectsInvalidKDFParams(t *testing.T) {
 	home := setupTempHome(t)
 
 	// Zero rounds would panic inside argon2.IDKey; the loader must reject it.
@@ -282,15 +282,15 @@ func TestPasswordStoreRejectsInvalidKDFParams(t *testing.T) {
 		t.Fatalf("write corrupt store: %v", err)
 	}
 
-	if _, err := LoadPasswordStore("master-pass"); err == nil {
+	if _, err := Load("master-pass"); err == nil {
 		t.Fatal("load of store with zero rounds succeeded, want error")
 	}
 }
 
-func TestPasswordStoreSaltIsRandomPerStore(t *testing.T) {
+func TestStoreSaltIsRandomPerStore(t *testing.T) {
 	home := setupTempHome(t)
 
-	first, err := LoadPasswordStore("master-pass")
+	first, err := Load("master-pass")
 	if err != nil {
 		t.Fatalf("create first store: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestPasswordStoreSaltIsRandomPerStore(t *testing.T) {
 		t.Fatalf("remove store file: %v", err)
 	}
 
-	second, err := LoadPasswordStore("master-pass")
+	second, err := Load("master-pass")
 	if err != nil {
 		t.Fatalf("create second store: %v", err)
 	}

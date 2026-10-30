@@ -14,6 +14,7 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/term"
 
+	"sshgo/internal/credential"
 	"sshgo/internal/host"
 )
 
@@ -229,13 +230,13 @@ func buildAuthMethodsNonInteractive(target host.Resolved, needSudo bool) ([]ssh.
 		if store != nil {
 			// First try saved sudo password
 			if needSudo {
-				if pwd, ok := lookupSudoPassword(store, target.CredKeys); ok {
+				if pwd, ok := credential.LookupSudoPassword(store, target.CredKeys); ok {
 					fmt.Fprintln(os.Stderr, "exec: using saved sudo password")
 					return fileSigners, pwd, !hasKeyAuth
 				}
 			}
 			// Then try saved SSH password
-			if pwd, ok := lookupSavedPassword(store, target.CredKeys); ok {
+			if pwd, ok := credential.LookupSavedPassword(store, target.CredKeys); ok {
 				fmt.Fprintln(os.Stderr, "exec: using saved password")
 				return fileSigners, pwd, !hasKeyAuth
 			}
@@ -317,8 +318,8 @@ func tryLoadKey(path string) ssh.Signer {
 
 // tryLoadPasswordStoreInteractive loads the password store, prompting for master password.
 // Returns nil if the file doesn't exist or the user cancels.
-func tryLoadPasswordStoreInteractive() *PasswordStore {
-	path := getPasswordStorePath()
+func tryLoadPasswordStoreInteractive() *credential.Store {
+	path := credential.Path()
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil
 	}
