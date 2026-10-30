@@ -12,14 +12,24 @@ import (
 	"golang.org/x/term"
 )
 
-// isInteractive returns true if stdin is a terminal.
-func isInteractive() bool {
+// IsStdinTerminal reports whether stdin is a terminal. This is the predicate
+// behind prompting: without a terminal there is nobody to answer.
+func IsStdinTerminal() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
+}
+
+// IsStdoutTerminal reports whether stdout is a terminal. It answers a different
+// question than IsStdinTerminal: whether the caller is running interactively as
+// seen from the output side, so that command substitution (`$(...)`) counts as
+// non-interactive. The two predicates are deliberately separate and must not be
+// collapsed.
+func IsStdoutTerminal() bool {
+	return term.IsTerminal(int(os.Stdout.Fd()))
 }
 
 // Select shows a numbered list and returns the selected index.
 func Select(label string, items []string) (int, string, error) {
-	if !isInteractive() {
+	if !IsStdinTerminal() {
 		return 0, "", fmt.Errorf("not a terminal")
 	}
 
@@ -49,7 +59,7 @@ func Select(label string, items []string) (int, string, error) {
 
 // Prompt asks for text input. If mask is 0, input is shown; otherwise masked.
 func Prompt(label string, mask rune, defaultValue string, allowEdit bool) (string, error) {
-	if !isInteractive() {
+	if !IsStdinTerminal() {
 		return "", fmt.Errorf("not a terminal")
 	}
 
@@ -117,7 +127,7 @@ func PasswordWithConfirm(label string) (string, error) {
 // YesNo asks a yes/no question and returns true if the answer is y/Y.
 // defaultAnswer sets the default when Enter is pressed without input.
 func YesNo(label, defaultAnswer string) bool {
-	if !isInteractive() {
+	if !IsStdinTerminal() {
 		return defaultAnswer == "y" || defaultAnswer == "Y"
 	}
 

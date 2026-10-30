@@ -1,18 +1,9 @@
-package main
+package cli
 
 import (
 	"encoding/json"
 
 	"sshgo/internal/host"
-)
-
-// Subcommand identifiers for CLI routing.
-type Subcommand string
-
-const (
-	SubExec   Subcommand = "exec"
-	SubInfo   Subcommand = "info"
-	SubConfig Subcommand = "config"
 )
 
 // ExecResult is the structured JSON output for a remote command.

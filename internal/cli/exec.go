@@ -1,9 +1,8 @@
-package main
+package cli
 
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -17,30 +16,33 @@ type execFlags struct {
 	Sudo bool
 }
 
-func handleExec(args []string) {
+func (c *CLI) runExec(args []string) int {
 	// Check for help before parsing flags
 	if len(args) >= 1 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Println("Usage: sshgo exec [--raw] [--sudo] <host> <command>")
-		fmt.Println()
-		fmt.Println("Execute a remote command with structured JSON output.")
-		fmt.Println()
-		fmt.Println("Flags:")
-		fmt.Println("  --raw     Output raw stdout/stderr stream (no JSON wrapper)")
-		fmt.Println("  --sudo    Execute command with sudo (reuses SSH password)")
-		fmt.Println()
-		fmt.Println("Examples:")
-		fmt.Println("  sshgo exec db-staging \"SELECT count(*) FROM users\"")
-		fmt.Println("  sshgo exec --raw web-01 \"tail -n 100 /var/log/nginx/access.log\"")
-		fmt.Println("  sshgo exec --sudo db-staging \"systemctl restart postgresql\"")
-		return
+		fmt.Fprintln(c.Out, "Usage: sshgo exec [--raw] [--sudo] <host> <command>")
+		fmt.Fprintln(c.Out)
+		fmt.Fprintln(c.Out, "Execute a remote command with structured JSON output.")
+		fmt.Fprintln(c.Out)
+		fmt.Fprintln(c.Out, "Flags:")
+		fmt.Fprintln(c.Out, "  --raw     Output raw stdout/stderr stream (no JSON wrapper)")
+		fmt.Fprintln(c.Out, "  --sudo    Execute command with sudo (reuses SSH password)")
+		fmt.Fprintln(c.Out)
+		fmt.Fprintln(c.Out, "Examples:")
+		fmt.Fprintln(c.Out, "  sshgo exec db-staging \"SELECT count(*) FROM users\"")
+		fmt.Fprintln(c.Out, "  sshgo exec --raw web-01 \"tail -n 100 /var/log/nginx/access.log\"")
+		fmt.Fprintln(c.Out, "  sshgo exec --sudo db-staging \"systemctl restart postgresql\"")
+		return 0
 	}
 
-	flags := parseExecFlags(&args)
+	flags, args, code, ok := c.parseExecFlags(args)
+	if !ok {
+		return code
+	}
 
 	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "Error: missing host or command")
-		fmt.Fprintln(os.Stderr, "Usage: sshgo exec [--raw] [--sudo] <host> <command>")
-		os.Exit(1)
+		fmt.Fprintln(c.Err, "Error: missing host or command")
+		fmt.Fprintln(c.Err, "Usage: sshgo exec [--raw] [--sudo] <host> <command>")
+		return 1
 	}
 
 	hostName := args[0]
@@ -48,50 +50,52 @@ func handleExec(args []string) {
 
 	target, err := host.Resolve(hostName)
 	if err != nil {
-		exitResolveError(err)
+		return c.resolveError(err)
 	}
 
 	start := time.Now()
-	result := executeRemote(target, command, flags)
+	result := c.executeRemote(target, command, flags)
 	result.Duration = time.Since(start).Round(time.Millisecond).String()
 
 	if flags.Raw {
-		os.Stdout.Write([]byte(result.Stdout))
-		os.Stderr.Write([]byte(result.Stderr))
-		os.Exit(result.ExitCode)
+		c.Out.Write([]byte(result.Stdout))
+		c.Err.Write([]byte(result.Stderr))
+		return result.ExitCode
 	}
 
-	fmt.Println(result.JSON())
-	os.Exit(result.ExitCode)
+	fmt.Fprintln(c.Out, result.JSON())
+	return result.ExitCode
 }
 
-func parseExecFlags(args *[]string) execFlags {
+// parseExecFlags strips the recognised flags from args, returning the remaining
+// positional arguments. The boolean is false when an unknown flag already failed
+// the command, in which case code is the exit code to return.
+func (c *CLI) parseExecFlags(args []string) (execFlags, []string, int, bool) {
 	var flags execFlags
-	var filtered []string
+	filtered := make([]string, 0, len(args))
 
-	for _, a := range *args {
+	for _, a := range args {
 		switch {
 		case a == "--raw":
 			flags.Raw = true
 		case a == "--sudo":
 			flags.Sudo = true
 		case strings.HasPrefix(a, "--"):
-			fmt.Fprintf(os.Stderr, "Unknown flag: %s\n", a)
-			os.Exit(1)
+			fmt.Fprintf(c.Err, "Unknown flag: %s\n", a)
+			return execFlags{}, nil, 1, false
 		default:
 			filtered = append(filtered, a)
 		}
 	}
 
-	*args = filtered
-	return flags
+	return flags, filtered, 0, true
 }
 
 // executeRemote dials the host, runs a command, and returns structured output.
 // The sudo password reaches the session through a separate exit, never through
 // the authentication methods.
-func executeRemote(target host.Resolved, command string, flags execFlags) ExecResult {
-	auth := &execAuth{needSudo: flags.Sudo}
+func (c *CLI) executeRemote(target host.Resolved, command string, flags execFlags) ExecResult {
+	auth := &execAuth{cli: c, needSudo: flags.Sudo}
 
 	client, err := connect.Dial(target, auth, connect.Options{Timeout: 30 * time.Second})
 	if err != nil {

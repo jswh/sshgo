@@ -1,11 +1,10 @@
-package main
+package cli
 
 import (
 	"bufio"
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -20,10 +19,12 @@ import (
 
 // interactiveAuth is the authentication strategy for the interactive login
 // path: it may prompt for a passphrase, a password, and whether to save it.
-type interactiveAuth struct{}
+type interactiveAuth struct {
+	cli *CLI
+}
 
 // HopAuth collects agent keys, key files, and a saved or prompted password.
-func (interactiveAuth) HopAuth(hop host.Resolved) (connect.HopCredentials, error) {
+func (a *interactiveAuth) HopAuth(hop host.Resolved) (connect.HopCredentials, error) {
 	var allSigners []ssh.Signer
 	var cleanup func()
 
@@ -33,12 +34,12 @@ func (interactiveAuth) HopAuth(hop host.Resolved) (connect.HopCredentials, error
 		sshAgent := agent.NewClient(conn)
 		if signers, err := sshAgent.Signers(); err == nil && len(signers) > 0 {
 			allSigners = append(allSigners, signers...)
-			fmt.Fprintln(os.Stderr, "Using SSH agent keys")
+			fmt.Fprintln(a.cli.Err, "Using SSH agent keys")
 		}
 	}
 
 	// 2. Non-agent methods: key files plus a password.
-	fileSigners, extraMethods, err := buildAuthMethods(hop)
+	fileSigners, extraMethods, err := a.buildAuthMethods(hop)
 	if err != nil {
 		if cleanup != nil {
 			cleanup()
@@ -58,31 +59,29 @@ func (interactiveAuth) HopAuth(hop host.Resolved) (connect.HopCredentials, error
 
 // SudoPassword is unused on the interactive path: sudo passwords only exist for
 // `exec --sudo`.
-func (interactiveAuth) SudoPassword(host.Resolved) (string, bool) { return "", false }
+func (a *interactiveAuth) SudoPassword(host.Resolved) (string, bool) { return "", false }
 
 // buildAuthMethods collects file-based key signers plus password methods for an
 // interactive login. Passwords are looked up and saved by Credential Key, so an
 // entry saved for the addressed name is found here as well as by `exec`.
-func buildAuthMethods(target host.Resolved) ([]ssh.Signer, []ssh.AuthMethod, error) {
+func (a *interactiveAuth) buildAuthMethods(target host.Resolved) ([]ssh.Signer, []ssh.AuthMethod, error) {
 	var fileSigners []ssh.Signer
 	var extraMethods []ssh.AuthMethod
 	identityFile := target.IdentityFile
 
 	// 1. Try configured IdentityFile
 	if identityFile != "" {
-		identityFile = host.ExpandPath(identityFile)
-		if signer, err := loadPrivateKey(identityFile); err == nil {
+		identityFile = expandIdentityFile(identityFile)
+		if signer, err := a.cli.loadPrivateKey(identityFile); err == nil {
 			fileSigners = append(fileSigners, signer)
-			fmt.Fprintf(os.Stderr, "Using key: %s\n", identityFile)
+			fmt.Fprintf(a.cli.Err, "Using key: %s\n", identityFile)
 		}
 	}
 
 	// 2. Try default keys (only if no IdentityFile configured)
 	if identityFile == "" {
-		homeDir, _ := os.UserHomeDir()
-		for _, keyName := range []string{"id_rsa", "id_ed25519", "id_ecdsa"} {
-			keyPath := filepath.Join(homeDir, ".ssh", keyName)
-			if signer, err := loadPrivateKey(keyPath); err == nil {
+		for _, keyPath := range defaultKeyPaths() {
+			if signer, err := a.cli.loadPrivateKey(keyPath); err == nil {
 				fileSigners = append(fileSigners, signer)
 			}
 		}
@@ -91,9 +90,9 @@ func buildAuthMethods(target host.Resolved) ([]ssh.Signer, []ssh.AuthMethod, err
 	// 3. Check saved passwords. The store is loaded here rather than passed in
 	// because loading may prompt for the master password, which should only
 	// happen when key auth is not enough.
-	if savedPwd, ok := credential.LookupSavedPassword(loadSavedPasswords(), target.CredKeys); ok {
+	if savedPwd, ok := credential.LookupSavedPassword(a.cli.loadSavedPasswords(), target.CredKeys); ok {
 		extraMethods = append(extraMethods, ssh.Password(savedPwd))
-		fmt.Fprintln(os.Stderr, "Using saved password")
+		fmt.Fprintln(a.cli.Err, "Using saved password")
 		return fileSigners, extraMethods, nil
 	}
 
@@ -112,13 +111,13 @@ func buildAuthMethods(target host.Resolved) ([]ssh.Signer, []ssh.AuthMethod, err
 
 	// Ask to save password
 	if ui.YesNo("Save password?", "n") {
-		store, err := initPasswordStore()
+		store, err := a.cli.initPasswordStore()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to initialize password store: %v\n", err)
+			fmt.Fprintf(a.cli.Err, "Failed to initialize password store: %v\n", err)
 		} else if err := store.Set(target.CredKeys[0], password); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to save password: %v\n", err)
+			fmt.Fprintf(a.cli.Err, "Failed to save password: %v\n", err)
 		} else {
-			fmt.Fprintln(os.Stderr, "Password saved")
+			fmt.Fprintln(a.cli.Err, "Password saved")
 		}
 	}
 
@@ -132,6 +131,7 @@ func buildAuthMethods(target host.Resolved) ([]ssh.Signer, []ssh.AuthMethod, err
 // identical to the pre-refactor code, and is then handed out through the
 // separate SudoPassword exit instead of being mixed into the auth methods.
 type execAuth struct {
+	cli      *CLI
 	needSudo bool
 	sudoPwd  string
 }
@@ -146,11 +146,11 @@ func (a *execAuth) HopAuth(hop host.Resolved) (connect.HopCredentials, error) {
 		sshAgent := agent.NewClient(conn)
 		if signers, err := sshAgent.Signers(); err == nil && len(signers) > 0 {
 			allSigners = append(allSigners, signers...)
-			fmt.Fprintln(os.Stderr, "exec: using SSH agent keys")
+			fmt.Fprintln(a.cli.Err, "exec: using SSH agent keys")
 		}
 	}
 
-	fileSigners, password, passwordIsAuthMethod := buildAuthMethodsNonInteractive(hop, a.needSudo)
+	fileSigners, password, passwordIsAuthMethod := a.buildAuthMethodsNonInteractive(hop)
 	allSigners = append(allSigners, fileSigners...)
 
 	var methods []ssh.AuthMethod
@@ -178,24 +178,22 @@ func (a *execAuth) SudoPassword(host.Resolved) (string, bool) {
 // The password is returned for sudo use even when it is not an auth method, so
 // "key auth + saved sudo password" keeps working.
 // Priority for sudo password: saved sudo password > saved SSH password > interactive prompt.
-func buildAuthMethodsNonInteractive(target host.Resolved, needSudo bool) ([]ssh.Signer, string, bool) {
+func (a *execAuth) buildAuthMethodsNonInteractive(target host.Resolved) ([]ssh.Signer, string, bool) {
 	var fileSigners []ssh.Signer
 	identityFile := target.IdentityFile
 
 	// Try configured IdentityFile (skip passphrase-protected keys non-interactively)
 	if identityFile != "" {
-		identityFile = host.ExpandPath(identityFile)
+		identityFile = expandIdentityFile(identityFile)
 		if signer := tryLoadKey(identityFile); signer != nil {
 			fileSigners = append(fileSigners, signer)
-			fmt.Fprintln(os.Stderr, "exec: using identity file")
+			fmt.Fprintln(a.cli.Err, "exec: using identity file")
 		}
 	}
 
 	// Try default keys
 	if identityFile == "" {
-		homeDir, _ := os.UserHomeDir()
-		for _, keyName := range []string{"id_rsa", "id_ed25519", "id_ecdsa"} {
-			keyPath := filepath.Join(homeDir, ".ssh", keyName)
+		for _, keyPath := range defaultKeyPaths() {
 			if signer := tryLoadKey(keyPath); signer != nil {
 				fileSigners = append(fileSigners, signer)
 			}
@@ -205,27 +203,27 @@ func buildAuthMethodsNonInteractive(target host.Resolved, needSudo bool) ([]ssh.
 	hasKeyAuth := len(fileSigners) > 0
 
 	// If sudo is needed or no key auth, try saved passwords (may prompt for master password)
-	if needSudo || !hasKeyAuth {
-		store := tryLoadPasswordStoreInteractive()
+	if a.needSudo || !hasKeyAuth {
+		store := a.cli.tryLoadPasswordStoreInteractive()
 		if store != nil {
 			// First try saved sudo password
-			if needSudo {
+			if a.needSudo {
 				if pwd, ok := credential.LookupSudoPassword(store, target.CredKeys); ok {
-					fmt.Fprintln(os.Stderr, "exec: using saved sudo password")
+					fmt.Fprintln(a.cli.Err, "exec: using saved sudo password")
 					return fileSigners, pwd, !hasKeyAuth
 				}
 			}
 			// Then try saved SSH password
 			if pwd, ok := credential.LookupSavedPassword(store, target.CredKeys); ok {
-				fmt.Fprintln(os.Stderr, "exec: using saved password")
+				fmt.Fprintln(a.cli.Err, "exec: using saved password")
 				return fileSigners, pwd, !hasKeyAuth
 			}
 		}
 	}
 
 	// Key auth + sudo + no saved passwords → prompt for sudo password
-	if needSudo && hasKeyAuth {
-		if pwd := promptSudoPassword(target); pwd != "" {
+	if a.needSudo && hasKeyAuth {
+		if pwd := a.cli.promptSudoPassword(target); pwd != "" {
 			return fileSigners, pwd, false
 		}
 	}
@@ -238,15 +236,15 @@ func buildAuthMethodsNonInteractive(target host.Resolved, needSudo bool) ([]ssh.
 // In non-interactive terminals, prints a hint and returns "".
 // The password is saved under the addressed host key, matching
 // `config set-sudo-password <host>`.
-func promptSudoPassword(target host.Resolved) string {
+func (c *CLI) promptSudoPassword(target host.Resolved) string {
 	hostKey := target.CredKeys[0]
 	if !isInteractive() {
-		fmt.Fprintf(os.Stderr, "sudo password required for %s@%s. Use `sshgo config set-sudo-password %s` to set one.\n", target.User, target.Hostname, hostKey)
+		fmt.Fprintf(c.Err, "sudo password required for %s@%s. Use `sshgo config set-sudo-password %s` to set one.\n", target.User, target.Hostname, hostKey)
 		return ""
 	}
-	fmt.Fprintf(os.Stderr, "sudo password for %s@%s (empty = NOPASSWD): ", target.User, target.Hostname)
+	fmt.Fprintf(c.Err, "sudo password for %s@%s (empty = NOPASSWD): ", target.User, target.Hostname)
 	pwdBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(c.Err)
 	if err != nil {
 		return ""
 	}
@@ -256,18 +254,18 @@ func promptSudoPassword(target host.Resolved) string {
 	}
 
 	// Ask to save
-	fmt.Fprintf(os.Stderr, "Save sudo password? (y/n): ")
+	fmt.Fprintf(c.Err, "Save sudo password? (y/n): ")
 	reader := bufio.NewReader(os.Stdin)
 	answer, _ := reader.ReadString('\n')
 	answer = strings.TrimSpace(answer)
 	if strings.ToLower(answer) == "y" {
-		store, err := initPasswordStore()
+		store, err := c.initPasswordStore()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to init password store: %v\n", err)
+			fmt.Fprintf(c.Err, "Failed to init password store: %v\n", err)
 		} else if err := store.SetSudoPassword(hostKey, pwd); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to save sudo password: %v\n", err)
+			fmt.Fprintf(c.Err, "Failed to save sudo password: %v\n", err)
 		} else {
-			fmt.Fprintln(os.Stderr, "sudo password saved")
+			fmt.Fprintln(c.Err, "sudo password saved")
 		}
 	}
 
@@ -277,10 +275,8 @@ func promptSudoPassword(target host.Resolved) string {
 // isInteractive checks whether stdout is a terminal (TTY).
 // Uses stdout instead of stdin so that subshells (e.g. test scripts with $())
 // are correctly detected as non-interactive, avoiding hangs on prompts.
-// Uses term.IsTerminal instead of ModeCharDevice because /dev/null is also
-// a character device on some systems but is not a TTY.
 func isInteractive() bool {
-	return term.IsTerminal(int(os.Stdout.Fd()))
+	return ui.IsStdoutTerminal()
 }
 
 // tryLoadKey tries to load a private key without passphrase prompts. Returns nil on failure.
@@ -298,10 +294,10 @@ func tryLoadKey(path string) ssh.Signer {
 
 // tryLoadPasswordStoreInteractive loads the password store, prompting for master password.
 // Returns nil if the file doesn't exist or the user cancels.
-func tryLoadPasswordStoreInteractive() *credential.Store {
+func (c *CLI) tryLoadPasswordStoreInteractive() *credential.Store {
 	path := credential.Path()
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil
 	}
-	return loadSavedPasswords()
+	return c.loadSavedPasswords()
 }

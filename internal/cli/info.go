@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"fmt"
@@ -13,7 +13,7 @@ import (
 	"sshgo/internal/host"
 )
 
-func handleInfo(args []string) {
+func (c *CLI) runInfo(args []string) int {
 	jsonFlag := false
 	var filtered []string
 
@@ -22,28 +22,28 @@ func handleInfo(args []string) {
 		case "--json":
 			jsonFlag = true
 		case "--help", "-h":
-			fmt.Println("Usage: sshgo info [--json] <host>")
-			fmt.Println()
-			fmt.Println("Display connection information for a host.")
-			fmt.Println()
-			fmt.Println("Flags:")
-			fmt.Println("  --json    Output as JSON")
-			return
+			fmt.Fprintln(c.Out, "Usage: sshgo info [--json] <host>")
+			fmt.Fprintln(c.Out)
+			fmt.Fprintln(c.Out, "Display connection information for a host.")
+			fmt.Fprintln(c.Out)
+			fmt.Fprintln(c.Out, "Flags:")
+			fmt.Fprintln(c.Out, "  --json    Output as JSON")
+			return 0
 		default:
 			filtered = append(filtered, a)
 		}
 	}
 
 	if len(filtered) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: sshgo info [--json] <host>")
-		os.Exit(1)
+		fmt.Fprintln(c.Err, "Usage: sshgo info [--json] <host>")
+		return 1
 	}
 
 	hostName := filtered[0]
 
 	target, err := host.Resolve(hostName)
 	if err != nil {
-		exitResolveError(err)
+		return c.resolveError(err)
 	}
 
 	result := buildInfoResult(target)
@@ -56,10 +56,11 @@ func handleInfo(args []string) {
 	}
 
 	if jsonFlag {
-		fmt.Println(result.JSON())
+		fmt.Fprintln(c.Out, result.JSON())
 	} else {
-		printInfoHuman(result)
+		printInfoHuman(c.Out, result)
 	}
+	return 0
 }
 
 func buildInfoResult(target host.Resolved) InfoResult {
@@ -94,7 +95,7 @@ func detectAuthMethods(identityFile string) []string {
 
 	// Check identity file exists
 	if identityFile != "" {
-		identityFile = host.ExpandPath(identityFile)
+		identityFile = expandIdentityFile(identityFile)
 		if _, err := os.Stat(identityFile); err == nil {
 			methods = append(methods, "IdentityFile (key)")
 		}
@@ -102,7 +103,7 @@ func detectAuthMethods(identityFile string) []string {
 
 	// Check default keys
 	homeDir, _ := os.UserHomeDir()
-	for _, keyName := range []string{"id_rsa", "id_ed25519", "id_ecdsa"} {
+	for _, keyName := range defaultKeyNames {
 		keyPath := filepath.Join(homeDir, ".ssh", keyName)
 		if _, err := os.Stat(keyPath); err == nil {
 			methods = append(methods, "Default key ("+keyName+")")
@@ -120,29 +121,29 @@ func detectAuthMethods(identityFile string) []string {
 	return methods
 }
 
-func printInfoHuman(result InfoResult) {
-	fmt.Println("Host:", result.Name)
-	fmt.Println("  Hostname:", result.Hostname)
-	fmt.Println("  Port:    ", result.Port)
-	fmt.Println("  User:    ", result.User)
-	fmt.Println("  Source:  ", result.Source)
-	fmt.Println("  Auth:")
+func printInfoHuman(out interface{ Write([]byte) (int, error) }, result InfoResult) {
+	fmt.Fprintln(out, "Host:", result.Name)
+	fmt.Fprintln(out, "  Hostname:", result.Hostname)
+	fmt.Fprintln(out, "  Port:    ", result.Port)
+	fmt.Fprintln(out, "  User:    ", result.User)
+	fmt.Fprintln(out, "  Source:  ", result.Source)
+	fmt.Fprintln(out, "  Auth:")
 	for _, m := range result.AuthMethods {
-		fmt.Println("    -", m)
+		fmt.Fprintln(out, "    -", m)
 	}
 	if result.Meta != nil {
-		fmt.Println("  Metadata:")
+		fmt.Fprintln(out, "  Metadata:")
 		if result.Meta.Alias != "" {
-			fmt.Println("    Alias:", result.Meta.Alias)
+			fmt.Fprintln(out, "    Alias:", result.Meta.Alias)
 		}
 		if result.Meta.Notes != "" {
-			fmt.Println("    Notes:", result.Meta.Notes)
+			fmt.Fprintln(out, "    Notes:", result.Meta.Notes)
 		}
 		if len(result.Meta.Tags) > 0 {
-			fmt.Println("    Tags: ", strings.Join(result.Meta.Tags, ", "))
+			fmt.Fprintln(out, "    Tags: ", strings.Join(result.Meta.Tags, ", "))
 		}
 		if len(result.Meta.ConnectionPriority) > 0 {
-			fmt.Println("    Priority:", strings.Join(result.Meta.ConnectionPriority, ", "))
+			fmt.Fprintln(out, "    Priority:", strings.Join(result.Meta.ConnectionPriority, ", "))
 		}
 	}
 }
