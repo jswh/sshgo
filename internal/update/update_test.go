@@ -1,6 +1,7 @@
-package main
+package update
 
 import (
+	"bytes"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -422,5 +423,70 @@ func TestFullUpdateFlow_MockedServer(t *testing.T) {
 	}
 	if string(data) != string(binaryContent) {
 		t.Errorf("replaced file content = %q, want %q", string(data), string(binaryContent))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Run tests: version is an input, so the flow is testable without the root
+// package's version variable.
+// ---------------------------------------------------------------------------
+
+func TestRunHelpWritesUsageToStdout(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+
+	if code := Run("dev", []string{"--help"}, &stdout, &stderr); code != 0 {
+		t.Errorf("Run(--help) = %d, want 0", code)
+	}
+	if !strings.Contains(stdout.String(), "Usage: sshgo update") {
+		t.Errorf("stdout = %q, want the usage line", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunUnknownFlagReturnsOne(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+
+	if code := Run("dev", []string{"--foo"}, &stdout, &stderr); code != 1 {
+		t.Errorf("Run(--foo) = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), `unknown flag "--foo"`) {
+		t.Errorf("stderr = %q, want the unknown flag error", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Usage: sshgo update") {
+		t.Errorf("stderr = %q, want the usage line", stderr.String())
+	}
+}
+
+func TestRunUnreachableServerReturnsOne(t *testing.T) {
+	t.Setenv("SSHGO_UPDATE_SERVER", "http://127.0.0.1:1")
+
+	var stdout, stderr bytes.Buffer
+	if code := Run("dev", nil, &stdout, &stderr); code != 1 {
+		t.Errorf("Run() = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "Failed to check for updates") {
+		t.Errorf("stderr = %q, want the check failure message", stderr.String())
+	}
+}
+
+func TestRunAlreadyUpToDate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "/releases/tag/v1.2.3")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer server.Close()
+	t.Setenv("SSHGO_UPDATE_SERVER", server.URL)
+
+	var stdout, stderr bytes.Buffer
+	if code := Run("v1.2.3", nil, &stdout, &stderr); code != 0 {
+		t.Errorf("Run() = %d, want 0", code)
+	}
+	if !strings.Contains(stdout.String(), "Already up to date (v1.2.3)") {
+		t.Errorf("stdout = %q, want the up-to-date line", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "Downloading") {
+		t.Errorf("stdout = %q, want no download attempt", stdout.String())
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"sshgo/internal/credential"
 	"sshgo/internal/host"
 	"sshgo/internal/ui"
+	"sshgo/internal/update"
 )
 
 func main() {
@@ -40,7 +41,7 @@ func main() {
 	case "config":
 		handleConfig(args[1:])
 	case "update":
-		handleUpdate(args[1:])
+		os.Exit(update.Run(version, args[1:], os.Stdout, os.Stderr))
 	default:
 		// Legacy mode: sshgo <host> [command]
 		var command string

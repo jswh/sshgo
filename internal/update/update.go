@@ -1,4 +1,8 @@
-package main
+// Package update implements self-update: find the latest release tag through an
+// HTTP redirect (avoiding API rate limits), download the artifact for this
+// OS/arch, and replace the running binary. The current version is passed in by
+// the caller so this package has no dependency on the root version variable.
+package update
 
 import (
 	"fmt"
@@ -14,6 +18,9 @@ import (
 
 const (
 	githubRepo = "jswh/sshgo"
+
+	// devVersion marks a build without an injected version.
+	devVersion = "dev"
 )
 
 // getUpdateServer returns the base URL for update checks.
@@ -36,72 +43,73 @@ func getDownloadURL(tag string) string {
 		getUpdateServer(), tag, runtime.GOOS, runtime.GOARCH)
 }
 
-func handleUpdate(args []string) {
+// Run checks for a newer release and replaces the running binary. It returns
+// the process exit code and writes user-facing output to stdout/stderr.
+func Run(currentVersion string, args []string, stdout, stderr io.Writer) int {
 	if len(args) >= 1 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Println("Usage: sshgo update")
-		fmt.Println()
-		fmt.Println("Check for updates and replace the current binary with the latest release.")
-		fmt.Println("The latest version is fetched from GitHub releases.")
-		fmt.Println()
-		fmt.Println("Environment:")
-		fmt.Println("  SSHGO_UPDATE_SERVER  Override the update server URL (for testing)")
-		return
+		fmt.Fprintln(stdout, "Usage: sshgo update")
+		fmt.Fprintln(stdout)
+		fmt.Fprintln(stdout, "Check for updates and replace the current binary with the latest release.")
+		fmt.Fprintln(stdout, "The latest version is fetched from GitHub releases.")
+		fmt.Fprintln(stdout)
+		fmt.Fprintln(stdout, "Environment:")
+		fmt.Fprintln(stdout, "  SSHGO_UPDATE_SERVER  Override the update server URL (for testing)")
+		return 0
 	}
 
 	if len(args) > 0 {
-		fmt.Fprintf(os.Stderr, "Error: unknown flag %q\n", args[0])
-		fmt.Fprintln(os.Stderr, "Usage: sshgo update")
-		os.Exit(1)
+		fmt.Fprintf(stderr, "Error: unknown flag %q\n", args[0])
+		fmt.Fprintln(stderr, "Usage: sshgo update")
+		return 1
 	}
 
-	currentVersion := version
 	latestVersion, err := getLatestReleaseTag()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to check for updates: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "Failed to check for updates: %v\n", err)
+		return 1
 	}
 
 	downloadURL := getDownloadURL(latestVersion)
 
-	if currentVersion != "dev" {
+	if currentVersion != devVersion {
 		cmp := semverCompare(currentVersion, latestVersion)
 		if cmp >= 0 {
-			fmt.Printf("Already up to date (%s)\n", currentVersion)
-			return
+			fmt.Fprintf(stdout, "Already up to date (%s)\n", currentVersion)
+			return 0
 		}
-		fmt.Printf("Updating from %s to %s ...\n", currentVersion, latestVersion)
+		fmt.Fprintf(stdout, "Updating from %s to %s ...\n", currentVersion, latestVersion)
 	} else {
-		fmt.Printf("Development build detected. Downloading latest release %s ...\n", latestVersion)
+		fmt.Fprintf(stdout, "Development build detected. Downloading latest release %s ...\n", latestVersion)
 	}
 
 	// Download to a temp file
 	tmpFile, err := os.CreateTemp("", "sshgo-*")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create temp file: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "Failed to create temp file: %v\n", err)
+		return 1
 	}
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath)
 
-	fmt.Printf("Downloading %s ...\n", downloadURL)
+	fmt.Fprintf(stdout, "Downloading %s ...\n", downloadURL)
 	if err := downloadFile(downloadURL, tmpFile); err != nil {
 		tmpFile.Close()
-		fmt.Fprintf(os.Stderr, "Download failed: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "Download failed: %v\n", err)
+		return 1
 	}
 	tmpFile.Close()
 
 	// Mark as executable
 	if err := os.Chmod(tmpPath, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to set permissions: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "Failed to set permissions: %v\n", err)
+		return 1
 	}
 
 	// Get current binary path
 	currentExe, err := os.Executable()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to determine current executable path: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "Failed to determine current executable path: %v\n", err)
+		return 1
 	}
 	resolvedExe, err := filepath.EvalSymlinks(currentExe)
 	if err == nil {
@@ -110,15 +118,16 @@ func handleUpdate(args []string) {
 
 	// Replace binary
 	if err := replaceBinary(tmpPath, currentExe); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to replace binary: %v\n", err)
-		fmt.Printf("\nDownload saved to: %s\n", tmpPath)
-		fmt.Printf("You can manually install it:\n")
-		fmt.Printf("  sudo mv %s %s\n", tmpPath, currentExe)
-		fmt.Printf("  sudo chmod +x %s\n", currentExe)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "Failed to replace binary: %v\n", err)
+		fmt.Fprintf(stdout, "\nDownload saved to: %s\n", tmpPath)
+		fmt.Fprintf(stdout, "You can manually install it:\n")
+		fmt.Fprintf(stdout, "  sudo mv %s %s\n", tmpPath, currentExe)
+		fmt.Fprintf(stdout, "  sudo chmod +x %s\n", currentExe)
+		return 1
 	}
 
-	fmt.Printf("Successfully updated to %s\n", latestVersion)
+	fmt.Fprintf(stdout, "Successfully updated to %s\n", latestVersion)
+	return 0
 }
 
 // getLatestReleaseTag follows the /releases/latest redirect to extract the
@@ -152,9 +161,10 @@ func getLatestReleaseTag() (string, error) {
 // Location header.
 //
 // Accepted formats:
-//   /jswh/sshgo/releases/tag/v1.2.3       (relative)
-//   /releases/tag/v0.0.1                   (mock server)
-//   https://github.com/jswh/sshgo/releases/tag/v1.2.3  (absolute)
+//
+//	/jswh/sshgo/releases/tag/v1.2.3       (relative)
+//	/releases/tag/v0.0.1                   (mock server)
+//	https://github.com/jswh/sshgo/releases/tag/v1.2.3  (absolute)
 func parseTagFromLocation(location string) (string, error) {
 	const marker = "/releases/tag/"
 	idx := strings.Index(location, marker)
