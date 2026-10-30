@@ -194,6 +194,13 @@ func (c *LocalConfig) Unset(host, key string) error {
 	return c.Save()
 }
 
+// Remove deletes an entire host entry. It is `Unset` with no key, and exists as
+// its own name because import is a snapshot: hosts deleted from ~/.ssh/config
+// are not removed here, so users need a discoverable way to delete one.
+func (c *LocalConfig) Remove(host string) error {
+	return c.Unset(host, "")
+}
+
 // List returns all hosts with metadata, sorted by name.
 func (c *LocalConfig) List() []string {
 	var names []string
@@ -279,6 +286,7 @@ func handleConfig(args []string) {
 		fmt.Println("  get <host> [key]              Get metadata")
 		fmt.Println("  set <host> <key> <value>      Set metadata")
 		fmt.Println("  unset <host> [key]            Remove metadata or entire host entry")
+		fmt.Println("  remove <host>                 Remove an entire host entry (same as unset <host>)")
 		fmt.Println("  import                        Import hosts from ~/.ssh/config")
 		fmt.Println("  set-sudo-password <host>      Set sudo password for a host")
 		fmt.Println("  find --tag <tag>              Find hosts by tag")
@@ -352,6 +360,18 @@ func handleConfig(args []string) {
 			os.Exit(1)
 		}
 		fmt.Printf("Unset %s[%s]\n", host, key)
+
+	case "remove":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: sshgo config remove <host>")
+			os.Exit(1)
+		}
+		host := args[1]
+		if err := cfg.Remove(host); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Removed %s\n", host)
 
 	case "find":
 		if len(args) < 3 || args[1] != "--tag" {
