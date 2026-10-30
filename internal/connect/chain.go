@@ -3,6 +3,7 @@ package connect
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -13,10 +14,10 @@ import (
 // Parse-time chain failures. Callers branch on these with errors.Is and never
 // on message text.
 var (
-	ErrJumpHostNotFound       = errors.New("jump host not found")
-	ErrJumpHostNoDetails      = errors.New("jump host has no connection details")
-	ErrJumpValueUnsupported   = errors.New("jump host value not supported")
-	ErrChainNestedUnsupported = errors.New("nested jump chains unsupported")
+	ErrJumpHostNotFound     = errors.New("jump host not found")
+	ErrJumpHostNoDetails    = errors.New("jump host has no connection details")
+	ErrJumpValueUnsupported = errors.New("jump host value not supported")
+	ErrChainLoop            = errors.New("proxy jump chain loops")
 )
 
 // jumpNone is ssh's spelling for "no jump host". Import carries it over from
@@ -24,11 +25,12 @@ var (
 const jumpNone = "none"
 
 // ChainError is a chain failure detected without dialling: a broken link, a
-// jump host without connection details, or an unsupported spelling.
+// jump host without connection details, a loop, or an unsupported spelling.
 type ChainError struct {
 	kind   error
 	jump   string
 	target string
+	path   []string
 }
 
 func (e *ChainError) Error() string {
@@ -43,12 +45,12 @@ func (e *ChainError) Error() string {
 		return fmt.Sprintf("Jump host %q for %q has no connection details.\n"+
 			"  Set one: sshgo config set %s hostname <address>",
 			e.jump, e.target, e.jump)
+	case ErrChainLoop:
+		// No way out is offered: the path itself is the diagnosis.
+		return fmt.Sprintf("ProxyJump chain for %q loops: %s", e.target, strings.Join(e.path, " -> "))
 	case ErrJumpValueUnsupported:
 		return fmt.Sprintf("Jump host %q for %q is not an sshgo address.\n"+
 			"  Use a Host name, an Alias, or a Direct Address (user@host:port)", e.jump, e.target)
-	case ErrChainNestedUnsupported:
-		return fmt.Sprintf("Jump host %q for %q has its own proxy-jump, which is not supported yet.\n"+
-			"  Connect to %s directly instead", e.jump, e.target, e.jump)
 	}
 	return e.jump
 }
@@ -93,27 +95,48 @@ func (o Options) resolver() Resolver {
 }
 
 // ResolveChain expands target's proxy-jump into the ordered hops to dial before
-// it, outermost first. It performs no network I/O, so every failure here is a
-// parse-time failure and `info` can reach the same verdict as a connection
-// without dialling.
+// it, outermost first. Depth is unlimited: each hop is an ordinary Host that may
+// itself have a jump host.
+//
+// It performs no network I/O, so every failure here is a parse-time failure:
+// `info` reaches the same verdict as a connection without dialling, and a loop
+// is reported as a path instead of as a hang.
 func ResolveChain(target host.Resolved, opts Options) ([]host.Resolved, error) {
-	value := strings.TrimSpace(target.ProxyJump)
-	if isDirect(value) {
-		return nil, nil
+	resolve := opts.resolver()
+
+	// hops collects the chain as it is walked outward from the target; it is
+	// reversed before returning so callers dial the outermost hop first.
+	var hops []host.Resolved
+	// visited records the hosts already on the walk so a cycle is detected at
+	// the hop that closes it. It is keyed by Name, which is what a proxy-jump
+	// value addresses.
+	visited := []string{target.Name}
+
+	current := target
+	for {
+		value := strings.TrimSpace(current.ProxyJump)
+		if isDirect(value) {
+			break
+		}
+
+		hop, err := resolveJump(value, target.Name, resolve)
+		if err != nil {
+			return nil, err
+		}
+
+		if idx := slices.Index(visited, hop.Name); idx >= 0 {
+			// Print only the cycle: the tail leading into it is not the problem.
+			cycle := append(slices.Clone(visited[idx:]), hop.Name)
+			return nil, &ChainError{kind: ErrChainLoop, target: target.Name, path: cycle}
+		}
+
+		hops = append(hops, hop)
+		visited = append(visited, hop.Name)
+		current = hop
 	}
 
-	hop, err := resolveJump(value, target.Name, opts.resolver())
-	if err != nil {
-		return nil, err
-	}
-
-	// Deeper chains arrive with the next change; say so instead of silently
-	// ignoring the hop's own proxy-jump.
-	if next := strings.TrimSpace(hop.ProxyJump); !isDirect(next) {
-		return nil, &ChainError{kind: ErrChainNestedUnsupported, jump: next, target: target.Name}
-	}
-
-	return []host.Resolved{hop}, nil
+	slices.Reverse(hops)
+	return hops, nil
 }
 
 // isDirect reports whether a proxy-jump value means "no jump host".

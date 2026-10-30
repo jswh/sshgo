@@ -869,6 +869,12 @@ assert_contains "jump: broken chain exits 1" '"exit_code": 1' "$OUTPUT"
 OUTPUT=$($SSHGO info $TEST_JUMP_TARGET 2>&1 || true)
 assert_contains "jump: info errors on a broken chain" "not found" "$OUTPUT"
 
+# 2i-9: a loop is a parse-time failure with the path spelled out
+$SSHGO config set $TEST_JUMP_TARGET proxy-jump $TEST_JUMP_TARGET >/dev/null 2>&1
+OUTPUT=$($SSHGO info $TEST_JUMP_TARGET 2>&1 || true)
+assert_contains "jump: loop is reported with its path" "loops:" "$OUTPUT"
+$SSHGO config set $TEST_JUMP_TARGET proxy-jump "$TEST_BASTION" >/dev/null 2>&1
+
 # 2i-10: `none` means a direct connection, not an error
 $SSHGO config set $TEST_HOST proxy-jump none >/dev/null 2>&1
 OUTPUT=$($SSHGO exec $TEST_HOST "echo none_ok" 2>/dev/null || true)

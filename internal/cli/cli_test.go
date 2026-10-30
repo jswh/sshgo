@@ -366,3 +366,58 @@ func TestProxyJumpAcceptsAliasAndDirectAddress(t *testing.T) {
 		})
 	}
 }
+
+// A loop is a parse-time failure, so `info` reports it without dialling and the
+// path itself is the diagnosis.
+func TestChainLoopText(t *testing.T) {
+	setupTempHome(t)
+	seedHost(t, "db1", map[string]string{"hostname": "10.0.0.5", "proxy-jump": "bastion"})
+	seedHost(t, "bastion", map[string]string{"hostname": "10.0.0.9", "proxy-jump": "db1"})
+
+	code, stdout, _ := run(t, "exec", "db1", "true")
+	if code != 1 {
+		t.Errorf("exec exit code = %d, want 1", code)
+	}
+	var result ExecResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("exec output is not JSON: %v", err)
+	}
+	want := `ProxyJump chain for "db1" loops: db1 -> bastion -> db1`
+	if result.Stderr != want {
+		t.Errorf("exec stderr = %q, want %q", result.Stderr, want)
+	}
+
+	code, _, stderr := run(t, "db1")
+	if code != 1 {
+		t.Errorf("legacy exit code = %d, want 1", code)
+	}
+	if stderr != "Error: "+want+"\n" {
+		t.Errorf("legacy stderr = %q, want the loop text", stderr)
+	}
+}
+
+// A deeper chain resolves through every hop, and a break in the middle names the
+// hop that is missing and the Host the user addressed.
+func TestChainDepthIsUnlimited(t *testing.T) {
+	setupTempHome(t)
+	seedHost(t, "db1", map[string]string{"hostname": "10.0.0.5", "proxy-jump": "inner"})
+	seedHost(t, "inner", map[string]string{"hostname": "10.0.0.2", "proxy-jump": "edge"})
+	seedHost(t, "edge", map[string]string{"hostname": "10.0.0.1"})
+
+	if code, _, stderr := run(t, "info", "db1"); code != 0 {
+		t.Fatalf("info db1 exit code = %d, want 0 (stderr %q)", code, stderr)
+	}
+
+	seedHost(t, "inner", map[string]string{"proxy-jump": "ghost"})
+	code, stdout, _ := run(t, "exec", "db1", "true")
+	if code != 1 {
+		t.Errorf("exec exit code = %d, want 1", code)
+	}
+	var result ExecResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("exec output is not JSON: %v", err)
+	}
+	if !strings.Contains(result.Stderr, `Jump host "ghost" for "db1" not found.`) {
+		t.Errorf("exec stderr = %q, want the break named by hop and target", result.Stderr)
+	}
+}

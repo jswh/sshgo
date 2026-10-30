@@ -3,6 +3,7 @@ package connect
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -148,6 +149,133 @@ func TestChainWithoutJumpIsASingleDial(t *testing.T) {
 	}
 	if _, err := NewSession(client); err != nil {
 		t.Errorf("NewSession() on the target failed: %v", err)
+	}
+}
+
+// A three-hop chain is a normal environment (bastion -> inner -> target), not an
+// edge case: every hop authenticates as itself, outermost first, and the target
+// is reached through all of them.
+func TestChainThreeHopsDialsOutermostFirst(t *testing.T) {
+	srv := startTestServer(t)
+	edge, inner, target := srv.resolvedHost(), srv.resolvedHost(), srv.resolvedHost()
+	edge.Name, inner.Name, target.Name = "edge", "inner", "db1"
+	edge.User, inner.User, target.User = "edgeuser", "inneruser", "targetuser"
+	edge.ProxyJump, inner.ProxyJump = "", "edge"
+	inner.ProxyJump, target.ProxyJump = "edge", "inner"
+
+	hops, auth := recorder(passwordAuth("pw"))
+	opts := Options{Resolve: fakeResolver{"edge": edge, "inner": inner}.resolve}
+
+	client, cleanup, err := Chain(target, auth, opts)
+	if err != nil {
+		t.Fatalf("Chain() failed: %v", err)
+	}
+	defer cleanup()
+
+	var names []string
+	for _, h := range *hops {
+		names = append(names, h.Name)
+	}
+	if want := []string{"edge", "inner", "db1"}; !slices.Equal(names, want) {
+		t.Errorf("dial order = %v, want %v (outermost hop first)", names, want)
+	}
+
+	session, err := NewSession(client)
+	if err != nil {
+		t.Fatalf("NewSession() through a three-hop chain failed: %v", err)
+	}
+	captured, err := RunCapture(session, "deep", "")
+	if err != nil {
+		t.Fatalf("RunCapture() through a three-hop chain failed: %v", err)
+	}
+	if captured.Stdout != "ran:deep" {
+		t.Errorf("Stdout = %q, want the remote output", captured.Stdout)
+	}
+}
+
+// A loop is a parse-time failure: the path is printed and nothing is dialled.
+func TestResolveChainDetectsLoop(t *testing.T) {
+	db1 := host.Resolved{Name: "db1", Hostname: "10.0.0.5", Port: "22", User: "root", ProxyJump: "bastion"}
+	bastion := host.Resolved{Name: "bastion", Hostname: "10.0.0.9", Port: "22", User: "root", ProxyJump: "db1"}
+
+	hops, err := ResolveChain(db1, Options{Resolve: fakeResolver{"bastion": bastion, "db1": db1}.resolve})
+	if err == nil {
+		t.Fatalf("ResolveChain() on a loop succeeded with hops %v", hops)
+	}
+	if !errors.Is(err, ErrChainLoop) {
+		t.Fatalf("error = %v, want ErrChainLoop", err)
+	}
+	want := `ProxyJump chain for "db1" loops: db1 -> bastion -> db1`
+	if err.Error() != want {
+		t.Errorf("error =\n%q\nwant\n%q", err.Error(), want)
+	}
+}
+
+// A host that jumps to itself is the shortest loop and must not recurse.
+func TestResolveChainDetectsSelfLoop(t *testing.T) {
+	db1 := host.Resolved{Name: "db1", Hostname: "10.0.0.5", Port: "22", User: "root", ProxyJump: "db1"}
+
+	_, err := ResolveChain(db1, Options{Resolve: fakeResolver{"db1": db1}.resolve})
+	if !errors.Is(err, ErrChainLoop) {
+		t.Fatalf("error = %v, want ErrChainLoop", err)
+	}
+	if want := `ProxyJump chain for "db1" loops: db1 -> db1`; err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+// A deeper loop prints only the cycle, not the tail leading into it.
+func TestResolveChainLoopPrintsTheCycleOnly(t *testing.T) {
+	edge := host.Resolved{Name: "edge", Hostname: "10.0.0.1", Port: "22", User: "root"}
+	inner := host.Resolved{Name: "inner", Hostname: "10.0.0.2", Port: "22", User: "root", ProxyJump: "edge"}
+	edge.ProxyJump = "inner"
+	db1 := host.Resolved{Name: "db1", Hostname: "10.0.0.5", Port: "22", User: "root", ProxyJump: "inner"}
+
+	_, err := ResolveChain(db1, Options{Resolve: fakeResolver{"edge": edge, "inner": inner}.resolve})
+	if !errors.Is(err, ErrChainLoop) {
+		t.Fatalf("error = %v, want ErrChainLoop", err)
+	}
+	want := `ProxyJump chain for "db1" loops: inner -> edge -> inner`
+	if err.Error() != want {
+		t.Errorf("error =\n%q\nwant\n%q", err.Error(), want)
+	}
+}
+
+// A break anywhere in the chain names the failing hop and the host the user
+// addressed, not the intermediate one.
+func TestResolveChainBreakNamesHopAndTarget(t *testing.T) {
+	inner := host.Resolved{Name: "inner", Hostname: "10.0.0.2", Port: "22", User: "root", ProxyJump: "ghost"}
+	db1 := host.Resolved{Name: "db1", Hostname: "10.0.0.5", Port: "22", User: "root", ProxyJump: "inner"}
+
+	_, err := ResolveChain(db1, Options{Resolve: fakeResolver{"inner": inner}.resolve})
+	if !errors.Is(err, ErrJumpHostNotFound) {
+		t.Fatalf("error = %v, want ErrJumpHostNotFound", err)
+	}
+	msg := err.Error()
+	for _, want := range []string{`"ghost"`, `"db1"`} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q does not mention %s", msg, want)
+		}
+	}
+}
+
+// The chain is built without any network I/O, which is what lets `info` report
+// a broken chain without dialling.
+func TestResolveChainDoesNotDial(t *testing.T) {
+	edge := host.Resolved{Name: "edge", Hostname: "203.0.113.9", Port: "22", User: "root"}
+	inner := host.Resolved{Name: "inner", Hostname: "203.0.113.8", Port: "22", User: "root", ProxyJump: "edge"}
+	db1 := host.Resolved{Name: "db1", Hostname: "203.0.113.7", Port: "22", User: "root", ProxyJump: "inner"}
+
+	hops, err := ResolveChain(db1, Options{Resolve: fakeResolver{"edge": edge, "inner": inner}.resolve})
+	if err != nil {
+		t.Fatalf("ResolveChain() failed: %v", err)
+	}
+	var names []string
+	for _, h := range hops {
+		names = append(names, h.Name)
+	}
+	if want := []string{"edge", "inner"}; !slices.Equal(names, want) {
+		t.Errorf("hops = %v, want %v (outermost first)", names, want)
 	}
 }
 
