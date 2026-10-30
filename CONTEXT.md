@@ -1,12 +1,20 @@
 # sshgo
 
-A lightweight SSH client that imports system SSH config (via `config import`), supports key authentication, encrypted password storage, structured remote command execution, connection inspection, and local host metadata management.
+A lightweight SSH client that owns its host list: it imports system SSH config once (via `config import`), then runs on its own metadata. Supports key authentication, encrypted password storage, structured remote command execution, connection inspection, and local host metadata management.
 
 ## Language
 
 **Host**:
-A remote machine that can be connected to via SSH. Defined either in `~/.ssh/config` (SSH Config Host), as a direct address (`user@hostname:port`), or as a locally managed entry with metadata.
+A remote machine that can be connected to via SSH. Defined by local metadata in `~/.sshgo_config`: created by `config import` (from `~/.ssh/config`, the one-time seed), by a direct address (`user@hostname:port`), or by hand via `config set`.
 _Avoid_: Server, node, machine
+
+**Runtime Independence**:
+sshgo does not read `~/.ssh/config` while running: no parsing, no completion, no guessing. The file is read only during `config import`. A bare name that is not in local metadata is an error, never a fallback connection.
+_Avoid_: sync, live config, config passthrough
+
+**Import Snapshot**:
+`config import` is a migration, not a synchronization. It copies the effective (post-`Host *`) values of concrete hosts once; re-running refreshes connection details and keeps Alias/Notes/Tags/Connection Priority, but never deletes a Host that disappeared from `~/.ssh/config`. Wildcard and negated patterns are skipped.
+_Avoid_: sync, refresh config, mirror
 
 **exec**:
 A subcommand that runs a remote command on a Host and returns the result as structured JSON (`stdout`, `stderr`, `exit_code`) or raw stream (with `--raw` flag). Supports optional `--sudo` flag.
@@ -17,18 +25,27 @@ A subcommand that displays connection details for a Host — Hostname, Port, Use
 _Avoid_: status, inspect, details
 
 **config** (subcommand):
-A subcommand to manage local Host metadata stored in `~/.sshgo_config`. Supports CRUD on per-host fields: Alias, Notes, Tags, Connection Priority, Hostname, Port, User, IdentityFile, ProxyJump. Also provides `config import` to import hosts from `~/.ssh/config`.
+A subcommand to manage local Host metadata stored in `~/.sshgo_config`. Supports CRUD on per-host fields: Alias, Notes, Tags, Connection Priority, Hostname, Port, User, IdentityFile, ProxyJump. Also provides `config import` to take an Import Snapshot of `~/.ssh/config`, and `config remove <host>` to delete an entire entry (same as `config unset <host>`, no confirmation).
 _Avoid_: manage, settings, metadata
 
 **Source**:
-The origin of a Host definition. One of: `imported` (imported from `~/.ssh/config` via `config import`), `direct` (from CLI argument `user@host:port`), or `manual` (created via local metadata without connection details).
+The provenance of a Host entry, persisted in `~/.sshgo_config`. One of: `imported` (came from `config import`; means "was once imported", not "currently matches `~/.ssh/config`"), `direct` (from a CLI direct address `user@host:port`), or `manual` (created by `config set`). Provenance is where the entry came from, not who edited it last: editing an `imported` Host leaves it `imported`.
+_Avoid_: type, origin (use Source), last-modified-by
 
 **Local Metadata**:
-Per-Host information stored in `~/.sshgo_config`, independent of `~/.ssh/config` and the encrypted password store. Fields: Alias (quick-reference name), Notes (free text), Tags (categorical labels for filtering/grouping), Connection Priority (ordering of authentication methods), Hostname, Port, User, IdentityFile, ProxyJump (connection details imported from `~/.ssh/config` or set manually).
+Per-Host information stored in `~/.sshgo_config`, independent of `~/.ssh/config` and the encrypted password store. Fields: Alias (quick-reference name), Notes (free text), Tags (categorical labels for filtering/grouping), Connection Priority (ordering of authentication methods), Hostname, Port, User, IdentityFile, ProxyJump (connection details imported from `~/.ssh/config` or set manually). ProxyJump is stored only and does not affect connections yet.
 
 **Alias**:
-A user-defined short name for a Host that can be used as a positional argument instead of the full SSH config Host name or direct address.
+A user-defined short name for a Host that can be used as a positional argument instead of the Host name or direct address.
 _Avoid_: nickname, shortcut
+
+**Direct Address**:
+Any CLI input containing `@` or `:`. This is sshgo's own syntax, unrelated to `~/.ssh/config`: it is always dialed as given and never reported as a missing Host. Port defaults to `22` and user to `root`. IPv6 is rejected.
+_Avoid_: direct connection string, ad-hoc host
+
+**Resolution Error**:
+One of three typed failures produced by the single resolution entry point, each on stderr with exit code `1`: host not found (a bare name absent from local metadata), no connection details (an entry with no hostname), and IPv6 unsupported (more than one colon).
+_Avoid_: connection error, lookup failure
 
 **Auth Methods** (in info output):
 The authentication mechanisms available for a Host, described at a granular level but without exposing secrets. Example: `SSH Agent (3 keys), Password (saved)`. Never includes key paths, passwords, or passphrases.

@@ -4,7 +4,7 @@
 
 **Simple, Secure, and Efficient SSH Client**
 
-A lightweight SSH client that reads system SSH config, supports key authentication, and provides encrypted password storage.
+A lightweight SSH client that owns its host list: import your system SSH config once, then sshgo reads only its own metadata. Supports key authentication, encrypted password storage, structured remote execution, and connection inspection.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.20+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
@@ -22,6 +22,7 @@ A lightweight SSH client that reads system SSH config, supports key authenticati
 | Feature | Description |
 |---------|-------------|
 | 📖 **Import SSH Config** | One-time import from `~/.ssh/config` via `config import` |
+| 🛡️ **Runtime Independence** | Never reads `~/.ssh/config` at runtime; the import is the only touch point |
 | 🔑 **SSH Key Auth** | Supports SSH Agent, configured IdentityFile, and default keys |
 | 🔒 **Encrypted Storage** | AES-GCM encryption with master password protection |
 | 🚀 **Direct Login** | Supports `user@host:port` format for direct connections |
@@ -72,16 +73,31 @@ Before using sshgo for the first time, import your SSH config:
 sshgo config import
 ```
 
-This reads `~/.ssh/config` once and stores all host entries in `~/.sshgo_config`.
-Re-run after updating `~/.ssh/config` to sync changes.
+This reads `~/.ssh/config` once and stores the hosts it describes in `~/.sshgo_config`.
+From then on sshgo owns that list: it does not read `~/.ssh/config` again at runtime,
+so changing your system config does not silently change sshgo's behavior.
 
-### Login to SSH Config Host
+The import is a snapshot, not a sync. Values are the effective ones after `Host *`
+defaults are applied, and re-running the import refreshes connection details while
+keeping your aliases, notes, tags, and priorities. Hosts you delete from
+`~/.ssh/config` are **not** removed from sshgo; use `sshgo config remove <host>`.
+Wildcard patterns (`Host *`, `Host *.example.com`) are skipped, since sshgo connects
+to concrete hosts only.
+
+### Login to a Host from Your List
 
 ```bash
 sshgo zg
 ```
 
+A bare name is looked up in sshgo's own host list only. If it is not there, sshgo
+exits with an error naming the three ways out — it never falls back to dialing the
+name as a hostname the way `ssh` would.
+
 ### Direct Login
+
+Input containing `@` or `:` is a direct address, sshgo's own syntax, independent of
+`~/.ssh/config`. Direct addresses are always dialed as given:
 
 ```bash
 sshgo root@1.2.3.4
@@ -92,6 +108,9 @@ sshgo root@1.2.3.4
 ```bash
 sshgo root@1.2.3.4:2222
 ```
+
+Ports default to `22` and users to `root`. IPv6 addresses are not supported; create a
+host entry with the address instead.
 
 ### Interactive Host Selection
 
@@ -128,7 +147,7 @@ sshgo info --json db-staging    # Machine-readable JSON
 
 ### Config: Manage Hosts & Metadata
 
-Import hosts from `~/.ssh/config`:
+Import hosts from `~/.ssh/config` (a one-time snapshot; see Getting Started):
 
 ```bash
 sshgo config import
@@ -150,8 +169,21 @@ sshgo config set my-vm hostname 192.168.1.100
 sshgo config set my-vm user admin
 sshgo config set my-vm port 2222
 sshgo config set my-vm identity-file ~/.ssh/my_key
-sshgo config set my-vm proxy-jump bastion.example.com
+sshgo config set my-vm proxy-jump bastion.example.com   # stored only, not used yet
 ```
+
+`proxy-jump` is recorded and preserved for a future jump-host feature, but connections
+never go through it today. Importing a host that has `ProxyJump` set prints a warning
+for the same reason.
+
+Remove a host entry entirely (no confirmation, safe in scripts):
+
+```bash
+sshgo config remove my-vm
+```
+
+This is the same as `sshgo config unset my-vm`. You need it because hosts deleted from
+`~/.ssh/config` are not removed from sshgo by re-importing.
 
 View all hosts and their metadata:
 
@@ -243,6 +275,8 @@ falls back to the resolved Hostname so entries saved by address keep working.
 ```
 sshgo/
 ├── main.go          # CLI routing, legacy mode, authentication, connection
+├── resolve.go       # Single resolution entry point + typed resolution errors
+├── import.go        # config import: pure snapshot builder + I/O shell
 ├── exec.go          # Structured remote command execution (exec subcommand)
 ├── info.go          # Connection information display (info subcommand)
 ├── config.go        # Local host metadata management (config subcommand)
@@ -256,7 +290,8 @@ sshgo/
 ├── CONTEXT.md       # Domain glossary
 ├── docs/
 │   └── adr/
-│       └── 0001-separate-metadata-from-passwords.md
+│       ├── 0001-separate-metadata-from-passwords.md
+│       └── 0002-runtime-independence-from-system-ssh.md
 ├── go.mod           # Go module definition
 ├── go.sum           # Dependency checksums
 ├── LICENSE          # MIT License

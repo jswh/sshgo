@@ -4,7 +4,7 @@
 
 **简单、安全、高效的 SSH 客户端**
 
-一个简洁的 SSH 客户端，支持读取系统 SSH 配置、密钥认证和密码加密存储。
+一个简洁的 SSH 客户端：导入一次系统 SSH 配置，之后 sshgo 拥有自己的主机清单，运行时只读自己的元数据。支持密钥认证、密码加密存储、结构化远程执行与连接详情查看。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.20+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
@@ -22,6 +22,7 @@
 | 功能 | 描述 |
 |------|------|
 | 📖 **导入 SSH 配置** | 通过 `config import` 一次性导入 `~/.ssh/config` 的主机 |
+| 🛡️ **运行时独立** | 运行时永不读取 `~/.ssh/config`，导入是唯一的接触点 |
 | 🔑 **SSH Key 认证** | 支持 SSH Agent、配置的 IdentityFile 和默认密钥 |
 | 🔒 **密码加密存储** | 使用 AES-GCM 加密保存密码，主密码保护 |
 | 🚀 **直接登录** | 支持 `user@host:port` 格式直接连接 |
@@ -72,16 +73,29 @@ go install github.com/jswh/sshgo@latest
 sshgo config import
 ```
 
-这会一次性读取 `~/.ssh/config` 中的所有主机，并存储到 `~/.sshgo_config`。
-更新 `~/.ssh/config` 后重新执行即可同步变更。
+这会一次性读取 `~/.ssh/config`，把它描述的主机存入 `~/.sshgo_config`。
+从此这份清单归 sshgo 所有：运行时不再读 `~/.ssh/config`，所以你改系统配置
+不会悄悄改变 sshgo 的行为。
 
-### 登录 SSH 配置中的主机
+导入是**快照**，不是同步。存下的是应用 `Host *` 默认值之后的**有效值**；
+重复导入会刷新连接详情，同时保留你的 alias、notes、tags、priority。
+在 `~/.ssh/config` 里删掉的主机**不会**从 sshgo 中消失，请用
+`sshgo config remove <host>` 手动删除。
+通配符 pattern（`Host *`、`Host *.example.com`）会被跳过，因为 sshgo 只连具体主机。
+
+### 登录清单中的主机
 
 ```bash
 sshgo zg
 ```
 
+裸名只在 sshgo 自己的主机清单里查找。查不到就报错退出，并给出三条出路，
+**不会**像 `ssh` 那样把名字当主机名去连。
+
 ### 直接登录指定地址
+
+含 `@` 或 `:` 的输入是直连地址，属于 sshgo 自己的语法，与 `~/.ssh/config`
+无关。直连地址永远按原样连接：
 
 ```bash
 sshgo root@1.2.3.4
@@ -92,6 +106,8 @@ sshgo root@1.2.3.4
 ```bash
 sshgo root@1.2.3.4:2222
 ```
+
+端口缺省 `22`，用户缺省 `root`。不支持 IPv6 地址；请改为建一条 Host 条目。
 
 ### 交互式选择主机
 
@@ -128,7 +144,7 @@ sshgo info --json db-staging    # 机器可读 JSON 格式
 
 ### Config: 管理主机与元数据
 
-从 `~/.ssh/config` 导入主机：
+从 `~/.ssh/config` 导入主机（一次性快照，详见「首次使用」）：
 
 ```bash
 sshgo config import
@@ -150,8 +166,20 @@ sshgo config set my-vm hostname 192.168.1.100
 sshgo config set my-vm user admin
 sshgo config set my-vm port 2222
 sshgo config set my-vm identity-file ~/.ssh/my_key
-sshgo config set my-vm proxy-jump bastion.example.com
+sshgo config set my-vm proxy-jump bastion.example.com   # 只存不用，跳板连接尚未实现
 ```
+
+`proxy-jump` 会被记录并保留，留给将来的跳板功能，但目前的连接不会经过它。
+导入带 `ProxyJump` 的主机时同样会给出提示。
+
+删除整条主机条目（无确认交互，可在脚本中使用）：
+
+```bash
+sshgo config remove my-vm
+```
+
+等同于 `sshgo config unset my-vm`。之所以需要它：在 `~/.ssh/config` 里删掉的
+主机不会因为重新导入而从 sshgo 中消失。
 
 查看所有主机及其元数据：
 
@@ -240,6 +268,8 @@ Alias 与它指向的 Host 名是两个不同的键：为 `db-staging` 存的口
 ```
 sshgo/
 ├── main.go          # CLI 路由、遗留模式、认证、连接
+├── resolve.go       # 唯一的解析入口 + 类型化解析错误
+├── import.go        # config import：纯函数快照构建 + I/O 外壳
 ├── exec.go          # 结构化远程命令执行（exec 子命令）
 ├── info.go          # 连接信息展示（info 子命令）
 ├── config.go        # 主机元数据管理（config 子命令）
@@ -253,7 +283,8 @@ sshgo/
 ├── CONTEXT.md       # 领域术语表
 ├── docs/
 │   └── adr/
-│       └── 0001-separate-metadata-from-passwords.md
+│       ├── 0001-separate-metadata-from-passwords.md
+│       └── 0002-runtime-independence-from-system-ssh.md
 ├── go.mod           # Go 模块定义
 ├── go.sum           # 依赖校验
 ├── LICENSE          # MIT 许可证
