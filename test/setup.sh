@@ -628,13 +628,28 @@ assert_contains "info: includes meta block when alias set" '"meta"' "$OUTPUT"
 # ------------------------------------------------------------------
 echo "  --- Error Handling ---"
 
-# 2f-1: Exec on unreachable host (gets treated as direct, fails on connection)
+# 2f-1: Exec on a bare name that is not in local metadata is a hard error
 OUTPUT=$($SSHGO exec 192.0.2.1 "echo test" 2>&1 || true)
-assert_contains "exec: unreachable host error" "Connection failed" "$OUTPUT"
+assert_contains "exec: unknown bare name errors" "not found" "$OUTPUT"
+assert_contains "exec: unknown bare name offers config import" "config import" "$OUTPUT"
 
-# 2f-2: Info on unknown host (bare hostname is treated as direct connection)
+# 2f-2: Info on a bare name that is not in local metadata is a hard error
 OUTPUT=$($SSHGO info nonexistent 2>&1 || true)
-assert_contains "info: unknown host shows as direct" "direct" "$OUTPUT"
+assert_contains "info: unknown bare name errors" "not found" "$OUTPUT"
+
+# 2f-2b: Info on a direct address never reports not found
+OUTPUT=$($SSHGO info $TEST_DIRECT 2>&1 || true)
+assert_contains "info: direct address resolves" "direct" "$OUTPUT"
+
+# 2f-2c: Legacy mode reports unknown bare names on stderr with exit code 1
+STDERR=$($SSHGO nonexistent 2>&1 1>/dev/null || true)
+assert_contains "legacy: unknown bare name errors on stderr" "not found" "$STDERR"
+$SSHGO nonexistent >/dev/null 2>&1
+assert_eq "legacy: unknown bare name exits 1" 1 "$?"
+
+# 2f-2d: IPv6 input is rejected instead of being split on the last colon
+OUTPUT=$($SSHGO exec root@::1 "echo test" 2>&1 || true)
+assert_contains "exec: IPv6 rejected" "IPv6" "$OUTPUT"
 
 # 2f-3: Config invalid key
 OUTPUT=$($SSHGO config set $TEST_HOST invalid_key value 2>&1 || true)

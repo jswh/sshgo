@@ -38,59 +38,18 @@ func handleInfo(args []string) {
 
 	hostName := filtered[0]
 
-	passwords := &PasswordStore{Passwords: make(map[string]string)}
-	hosts := buildHostList(passwords)
-
-	_, hostname, _ := parseUserHost(hostName)
-
-	info, found := findHost(hosts, hostName)
-
-	if !found {
-		// Try alias resolution
-		aliasInfo := resolveAlias(hostName)
-		if aliasInfo.Name != "" {
-			info = aliasInfo
-			found = true
-			// Re-resolve from hosts list for full details
-			info2, f2 := findHost(hosts, info.Name)
-			if f2 {
-				info = info2
-			}
-		}
+	target, err := resolveTarget(hostName)
+	if err != nil {
+		exitResolveError(err)
 	}
 
-	if !found {
-		if hostname == "" {
-			fmt.Fprintf(os.Stderr, "Host %q not found. Run `sshgo config import` to import from ~/.ssh/config.\n", hostName)
-			os.Exit(1)
-		}
-		info = hostInfo{
-			Name:   hostName,
-			Source: "direct",
-		}
-	}
+	result := buildInfoResult(target)
 
-	result := buildInfoResult(info)
-
-	// Load local metadata (user-defined fields only, not connection details)
-	lc, err := LoadLocalConfig()
-	if err == nil {
-		var meta HostMeta
-		var ok bool
-		if meta, ok = lc.Hosts[result.Name]; !ok {
-			// Also check by alias
-			for _, m := range lc.Hosts {
-				if m.Alias == result.Name {
-					meta = m
-					ok = true
-					break
-				}
-			}
-		}
-		if ok {
-			userMeta := stripConnectionFields(meta)
-			result.Meta = &userMeta
-		}
+	// Local metadata shown alongside the connection details: user-defined fields
+	// only, never the connection values already surfaced above.
+	if target.Info.Source != sourceDirect {
+		userMeta := stripConnectionFields(target.Meta)
+		result.Meta = &userMeta
 	}
 
 	if jsonFlag {
@@ -100,7 +59,8 @@ func handleInfo(args []string) {
 	}
 }
 
-func buildInfoResult(info hostInfo) InfoResult {
+func buildInfoResult(target resolvedTarget) InfoResult {
+	info := target.Info
 	hostname, port, user, identityFile := resolveConnection(info)
 
 	// Detect available auth methods (non-interactive, non-sensitive)

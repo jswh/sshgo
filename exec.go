@@ -50,10 +50,9 @@ func handleExec(args []string) {
 	hostName := args[0]
 	command := strings.Join(args[1:], " ")
 
-	target, found := resolveExecTarget(hostName)
-	if !found {
-		fmt.Fprintf(os.Stderr, "Host %q not found. Run `sshgo config import` to import from ~/.ssh/config.\n", hostName)
-		os.Exit(1)
+	target, err := resolveTarget(hostName)
+	if err != nil {
+		exitResolveError(err)
 	}
 
 	start := time.Now()
@@ -68,107 +67,6 @@ func handleExec(args []string) {
 
 	fmt.Println(result.JSON())
 	os.Exit(result.ExitCode)
-}
-
-// execTarget is a resolved Host plus the credential lookup keys for it.
-type execTarget struct {
-	Info hostInfo
-	Cred credentialTarget
-}
-
-// resolveExecTarget resolves the addressed name into a dialable Host and the
-// password-store keys to try. The addressed name is kept as the primary key so
-// credentials saved by `config set-sudo-password <host>` are found.
-func resolveExecTarget(addressed string) (execTarget, bool) {
-	hosts := buildHostList(&PasswordStore{Passwords: make(map[string]string)})
-	_, hostname, _ := parseUserHost(addressed)
-
-	info, found := findHost(hosts, addressed)
-	if !found {
-		// Try alias resolution
-		if aliasInfo := resolveAlias(addressed); aliasInfo.Name != "" {
-			info, found = aliasInfo, true
-		}
-	}
-
-	if !found {
-		if hostname == "" {
-			return execTarget{}, false
-		}
-		info = hostInfo{
-			Name:   addressed,
-			Source: "direct",
-		}
-	}
-
-	resolvedHost, _, resolvedUser, _ := resolveConnection(info)
-	return execTarget{
-		Info: info,
-		Cred: credentialTarget{
-			Keys: credentialKeys(addressed, info.Name, resolvedHost),
-			Host: resolvedHost,
-			User: resolvedUser,
-		},
-	}, true
-}
-
-// resolveConnection fills in defaults for a Host's connection details.
-func resolveConnection(info hostInfo) (hostname, port, user, identityFile string) {
-	hostname = info.Hostname
-	port = info.Port
-	user = info.User
-	identityFile = info.IdentityFile
-
-	// For direct addresses, parse from the name string
-	if info.Source == "direct" {
-		name := info.Name
-		if idx := strings.Index(name, "@"); idx >= 0 {
-			user = name[:idx]
-			name = name[idx+1:]
-		}
-		if idx := strings.LastIndex(name, ":"); idx >= 0 {
-			hostname = name[:idx]
-			port = name[idx+1:]
-		} else {
-			hostname = name
-		}
-	}
-
-	if hostname == "" {
-		hostname = info.Name
-	}
-	if port == "" {
-		port = "22"
-	}
-	if user == "" {
-		user = "root"
-	}
-	return hostname, port, user, identityFile
-}
-
-// resolveAlias looks up a host by alias in local config.
-func resolveAlias(name string) hostInfo {
-	lc, err := LoadLocalConfig()
-	if err != nil {
-		return hostInfo{}
-	}
-	for host, meta := range lc.Hosts {
-		if meta.Alias == name {
-			info := hostInfo{
-				Name:         host,
-				Source:       "imported",
-				Hostname:     meta.Hostname,
-				Port:         meta.Port,
-				User:         meta.User,
-				IdentityFile: meta.IdentityFile,
-			}
-			if strings.Contains(host, "@") || strings.Contains(host, ":") {
-				info.Source = "direct"
-			}
-			return info
-		}
-	}
-	return hostInfo{}
 }
 
 func parseExecFlags(args *[]string) execFlags {
@@ -194,7 +92,7 @@ func parseExecFlags(args *[]string) execFlags {
 }
 
 // executeRemote dials the host, runs a command, and returns structured output.
-func executeRemote(target execTarget, command string, flags execFlags) ExecResult {
+func executeRemote(target resolvedTarget, command string, flags execFlags) ExecResult {
 	hostname, port, user, identityFile := resolveConnection(target.Info)
 
 	// 1. Collect all key signers (agent + file) for a single publickey method

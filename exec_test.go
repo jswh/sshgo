@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"slices"
 	"testing"
 )
@@ -60,7 +61,7 @@ func TestCredentialKeysPriority(t *testing.T) {
 // Regression: `exec --sudo acchost` used to pass the resolved hostname
 // (127.0.0.1) to the credential lookup, so a password saved under "acchost"
 // was never found. The resolved target must carry the addressed key first.
-func TestResolveExecTargetUsesAddressedKey(t *testing.T) {
+func TestResolveTargetUsesAddressedKey(t *testing.T) {
 	setupTempHome(t)
 
 	cfg, err := LoadLocalConfig()
@@ -73,9 +74,9 @@ func TestResolveExecTargetUsesAddressedKey(t *testing.T) {
 		}
 	}
 
-	target, ok := resolveExecTarget("acchost")
-	if !ok {
-		t.Fatal("resolveExecTarget(acchost) reported the host as not found")
+	target, err := resolveTarget("acchost")
+	if err != nil {
+		t.Fatalf("resolveTarget(acchost) failed: %v", err)
 	}
 	if target.Info.Name != "acchost" {
 		t.Errorf("Info.Name = %q, want %q", target.Info.Name, "acchost")
@@ -94,15 +95,15 @@ func TestResolveExecTargetUsesAddressedKey(t *testing.T) {
 	}
 }
 
-func TestResolveExecTargetDirectAddress(t *testing.T) {
+func TestResolveTargetDirectAddressShape(t *testing.T) {
 	setupTempHome(t)
 
-	target, ok := resolveExecTarget("root@10.0.0.5:2222")
-	if !ok {
-		t.Fatal("resolveExecTarget() reported a direct address as not found")
+	target, err := resolveTarget("root@10.0.0.5:2222")
+	if err != nil {
+		t.Fatalf("resolveTarget() rejected a direct address: %v", err)
 	}
-	if target.Info.Source != "direct" {
-		t.Errorf("Info.Source = %q, want %q", target.Info.Source, "direct")
+	if target.Info.Source != sourceDirect {
+		t.Errorf("Info.Source = %q, want %q", target.Info.Source, sourceDirect)
 	}
 	if target.Cred.Host != "10.0.0.5" || target.Cred.User != "root" {
 		t.Errorf("Cred = %+v, want host 10.0.0.5 and user root", target.Cred)
@@ -112,11 +113,11 @@ func TestResolveExecTargetDirectAddress(t *testing.T) {
 	}
 }
 
-func TestResolveExecTargetUnknownName(t *testing.T) {
+func TestResolveTargetEmptyNameNotFound(t *testing.T) {
 	setupTempHome(t)
 
-	if _, ok := resolveExecTarget(""); ok {
-		t.Error("resolveExecTarget(\"\") reported found, want not found")
+	if _, err := resolveTarget(""); !errors.Is(err, errHostNotFound) {
+		t.Errorf("resolveTarget(\"\") error = %v, want errHostNotFound", err)
 	}
 }
 

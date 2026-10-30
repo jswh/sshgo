@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -51,47 +52,18 @@ func main() {
 	default:
 		// Legacy mode: sshgo <host> [command]
 		passwords := &PasswordStore{Passwords: make(map[string]string)}
-		hosts := buildHostList(passwords)
 
 		var command string
 		if len(args) > 1 {
 			command = strings.Join(args[1:], " ")
 		}
 
-		hostName := args[0]
-		user, hostname, port := parseUserHost(hostName)
-
-		// 1. Try local config lookup
-		info, found := findHost(hosts, hostName)
-
-		if !found {
-			// 2. Try alias resolution
-			aliasInfo := resolveAlias(hostName)
-			if aliasInfo.Name != "" {
-				info = aliasInfo
-				found = true
-			}
+		target, err := resolveTarget(args[0])
+		if err != nil {
+			exitResolveError(err)
 		}
 
-		if !found {
-			// 3. Fall through to direct connection
-			if hostname == "" {
-				fmt.Printf("Host %s not found. Run `sshgo config import` to import from ~/.ssh/config.\n", hostName)
-				os.Exit(1)
-			}
-			info = hostInfo{
-				Name:   hostname,
-				Source: "direct",
-			}
-			if user != "" {
-				info.Name = user + "@" + hostname
-			}
-			if port != "" {
-				info.Name = info.Name + ":" + port
-			}
-		}
-
-		connectToHost(info, passwords, command)
+		connectToHost(target, passwords, command)
 	}
 }
 
@@ -129,7 +101,7 @@ func printHelp() {
 
 func interactiveSelect() {
 	passwords := &PasswordStore{Passwords: make(map[string]string)}
-	hosts := buildHostList(passwords)
+	hosts := buildHostList()
 
 	if len(hosts) == 0 {
 		fmt.Println("No hosts found. Run `sshgo config import` to import from ~/.ssh/config.")
@@ -154,23 +126,19 @@ func interactiveSelect() {
 		os.Exit(1)
 	}
 
-	connectToHost(hosts[idx], passwords, "")
+	info := hosts[idx]
+	target, err := resolveTarget(info.Name)
+	if err != nil {
+		exitResolveError(err)
+	}
+	connectToHost(target, passwords, "")
 }
 
-func parseUserHost(s string) (user, host, port string) {
-	if idx := strings.Index(s, "@"); idx >= 0 {
-		user = s[:idx]
-		s = s[idx+1:]
-	}
-
-	if idx := strings.LastIndex(s, ":"); idx >= 0 {
-		host = s[:idx]
-		port = s[idx+1:]
-	} else {
-		host = s
-	}
-
-	return user, host, port
+// exitResolveError reports a resolution failure on stderr and exits 1. Every
+// entry point shares this so the three of them cannot drift apart again.
+func exitResolveError(err error) {
+	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	os.Exit(1)
 }
 
 func initPasswordStore() (*PasswordStore, error) {
@@ -198,7 +166,7 @@ func initPasswordStore() (*PasswordStore, error) {
 	return LoadPasswordStore(masterPwd)
 }
 
-func buildHostList(passwords *PasswordStore) []hostInfo {
+func buildHostList() []hostInfo {
 	var result []hostInfo
 
 	lc, err := LoadLocalConfig()
@@ -207,34 +175,15 @@ func buildHostList(passwords *PasswordStore) []hostInfo {
 	}
 
 	for name, meta := range lc.Hosts {
-		source := "manual"
-		if meta.Hostname != "" || meta.User != "" || meta.Port != "" || meta.IdentityFile != "" {
-			source = "imported"
-		}
-		result = append(result, hostInfo{
-			Name:         name,
-			Source:       source,
-			Hostname:     meta.Hostname,
-			Port:         meta.Port,
-			User:         meta.User,
-			IdentityFile: meta.IdentityFile,
-		})
+		result = append(result, hostInfoFromMeta(name, meta))
 	}
 
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
 	return result
 }
 
-func findHost(hosts []hostInfo, name string) (hostInfo, bool) {
-	for _, h := range hosts {
-		if h.Name == name {
-			return h, true
-		}
-	}
-	return hostInfo{}, false
-}
-
-func connectToHost(info hostInfo, passwords *PasswordStore, command string) {
-	hostname, port, user, identityFile := resolveConnection(info)
+func connectToHost(target resolvedTarget, passwords *PasswordStore, command string) {
+	hostname, port, user, identityFile := resolveConnection(target.Info)
 
 	// 1. Collect all key signers (agent + file) for a single publickey method
 	var allSigners []ssh.Signer
@@ -249,7 +198,7 @@ func connectToHost(info hostInfo, passwords *PasswordStore, command string) {
 	}
 
 	// 2. Build non-agent auth methods (file signers + passwords)
-	fileSigners, extraMethods, err := buildAuthMethods(hostname, user, identityFile, passwords)
+	fileSigners, extraMethods, err := buildAuthMethods(target.Cred, identityFile, passwords)
 	if err != nil {
 		if agentConn != nil {
 			agentConn.Close()
@@ -337,7 +286,10 @@ func connectToHost(info hostInfo, passwords *PasswordStore, command string) {
 	}
 }
 
-func buildAuthMethods(hostName, user, identityFile string, passwords *PasswordStore) ([]ssh.Signer, []ssh.AuthMethod, error) {
+// buildAuthMethods collects file-based key signers plus password methods for an
+// interactive login. Passwords are looked up and saved by Credential Key, so an
+// entry saved for the addressed name is found here as well as by `exec`.
+func buildAuthMethods(cred credentialTarget, identityFile string, passwords *PasswordStore) ([]ssh.Signer, []ssh.AuthMethod, error) {
 	var fileSigners []ssh.Signer
 	var extraMethods []ssh.AuthMethod
 
@@ -362,14 +314,10 @@ func buildAuthMethods(hostName, user, identityFile string, passwords *PasswordSt
 	}
 
 	// 3. Check saved passwords
-	savedPasswords := loadSavedPasswords()
-	if savedPasswords.Has(hostName) {
-		savedPwd, err := savedPasswords.Get(hostName)
-		if err == nil {
-			extraMethods = append(extraMethods, ssh.Password(savedPwd))
-			fmt.Fprintln(os.Stderr, "Using saved password")
-			return fileSigners, extraMethods, nil
-		}
+	if savedPwd, ok := lookupSavedPassword(passwords, cred.Keys); ok {
+		extraMethods = append(extraMethods, ssh.Password(savedPwd))
+		fmt.Fprintln(os.Stderr, "Using saved password")
+		return fileSigners, extraMethods, nil
 	}
 
 	// 4. Return if we have any auth methods
@@ -378,7 +326,7 @@ func buildAuthMethods(hostName, user, identityFile string, passwords *PasswordSt
 	}
 
 	// 5. Prompt for password
-	password, err := ui.Password(fmt.Sprintf("Enter password for %s@%s", user, hostName))
+	password, err := ui.Password(fmt.Sprintf("Enter password for %s@%s", cred.User, cred.Host))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to enter password: %w", err)
 	}
@@ -390,7 +338,7 @@ func buildAuthMethods(hostName, user, identityFile string, passwords *PasswordSt
 		store, err := initPasswordStore()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to initialize password store: %v\n", err)
-		} else if err := store.Set(hostName, password); err != nil {
+		} else if err := store.Set(cred.Keys[0], password); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to save password: %v\n", err)
 		} else {
 			fmt.Fprintln(os.Stderr, "Password saved")
