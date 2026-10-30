@@ -8,8 +8,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/kevinburke/ssh_config"
-
 	"sshgo/internal/ui"
 )
 
@@ -380,70 +378,6 @@ func handleConfig(args []string) {
 		fmt.Fprintf(os.Stderr, "Unknown config command: %q\n", cmd)
 		os.Exit(1)
 	}
-}
-
-// handleConfigImport reads ~/.ssh/config and imports hosts into the local config.
-func handleConfigImport() {
-	sshCfg, err := loadSSHConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to read ~/.ssh/config: %v\n", err)
-		os.Exit(1)
-	}
-
-	lc, err := LoadLocalConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	count := 0
-	for _, host := range sshCfg.Hosts {
-		for _, pattern := range host.Patterns {
-			name := strings.TrimSpace(pattern.String())
-			if name == "" || name == "*" {
-				continue
-			}
-
-			// Preserve existing metadata (alias, notes, tags, priority)
-			meta := lc.Hosts[name]
-			meta.Source = sourceImported
-			meta.Hostname, _ = sshCfg.Get(name, "Hostname")
-			meta.Port, _ = sshCfg.Get(name, "Port")
-			meta.User, _ = sshCfg.Get(name, "User")
-			meta.IdentityFile, _ = sshCfg.Get(name, "IdentityFile")
-			meta.ProxyJump, _ = sshCfg.Get(name, "ProxyJump")
-
-			if lc.Hosts == nil {
-				lc.Hosts = make(map[string]HostMeta)
-			}
-			lc.Hosts[name] = meta
-			count++
-		}
-	}
-
-	if err := lc.Save(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("Imported %d hosts from ~/.ssh/config\n", count)
-	fmt.Println("Run `sshgo config list` to see imported hosts.")
-	fmt.Println("Re-run `sshgo config import` after updating ~/.ssh/config.")
-}
-
-// loadSSHConfig reads and parses ~/.ssh/config.
-func loadSSHConfig() (*ssh_config.Config, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
-	}
-	configPath := filepath.Join(homeDir, ".ssh", "config")
-	f, err := os.Open(configPath)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return ssh_config.Decode(f)
 }
 
 // handleSetSudoPassword prompts for a sudo password and saves it to the encrypted store.
