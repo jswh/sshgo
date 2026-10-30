@@ -885,6 +885,67 @@ OUTPUT=$($SSHGO info $TEST_JUMP_TARGET 2>&1 || true)
 assert_contains "jump: loop is reported with its path" "loops:" "$OUTPUT"
 $SSHGO config set $TEST_JUMP_TARGET proxy-jump "$TEST_BASTION" >/dev/null 2>&1
 
+# 2i-9b: config set-password files an SSH password, and exec then authenticates
+# with it. The bastion is password-only: key auth is switched off for root, so a
+# saved password is the only way in and the command is load-bearing.
+PASSWORD_ONLY_BASTION="pw-bastion"
+$SSHGO config set "$PASSWORD_ONLY_BASTION" hostname 127.0.0.1 >/dev/null 2>&1
+$SSHGO config set "$PASSWORD_ONLY_BASTION" port "$BASTION_PORT" >/dev/null 2>&1
+$SSHGO config set "$PASSWORD_ONLY_BASTION" user root >/dev/null 2>&1
+docker exec "$BASTION_NAME" sh -c 'sed -i "s/^#\?PubkeyAuthentication.*/PubkeyAuthentication no/" /etc/ssh/sshd_config'
+docker exec "$BASTION_NAME" sh -c 'pkill -HUP sshd || true'
+sleep 1
+
+# Without a saved password the connection must fail rather than prompt.
+OUTPUT=$($SSHGO exec "$PASSWORD_ONLY_BASTION" "echo pw_ok" 2>/dev/null || true)
+assert_not_contains "set-password: password-only bastion fails without a saved password" '"exit_code": 0' "$OUTPUT"
+
+# Save the password, then connect. printf feeds the two prompts and the master
+# password; the store is created on the first save.
+printf 'rootpass\nrootpass\nmasterpw\nmasterpw\n' | \
+    script -qec "$SSHGO config set-password $PASSWORD_ONLY_BASTION" /dev/null >/dev/null 2>&1 || true
+assert_contains "set-password: password store created" "master" "$(printf 'masterpw\n' | script -qec "$SSHGO config list" /dev/null 2>&1 || true)"
+
+OUTPUT=$(printf 'masterpw\n' | script -qec "$SSHGO exec $PASSWORD_ONLY_BASTION 'echo pw_ok'" /dev/null 2>&1 || true)
+assert_contains "set-password: exec authenticates with the saved password" "pw_ok" "$OUTPUT"
+
+# Restore key auth so the rest of the suite is unaffected.
+docker exec "$BASTION_NAME" sh -c 'sed -i "s/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/" /etc/ssh/sshd_config'
+docker exec "$BASTION_NAME" sh -c 'pkill -HUP sshd || true'
+sleep 1
+rm -f ~/.sshgo_passwords
+
+# 2i-9b: config set-password files an SSH password, and exec then authenticates
+# with it. The bastion is made password-only first, so the saved password is the
+# only way in and the command is load-bearing rather than decorative.
+PASSWORD_ONLY_BASTION="pw-bastion"
+$SSHGO config set "$PASSWORD_ONLY_BASTION" hostname 127.0.0.1 >/dev/null 2>&1
+$SSHGO config set "$PASSWORD_ONLY_BASTION" port "$BASTION_PORT" >/dev/null 2>&1
+$SSHGO config set "$PASSWORD_ONLY_BASTION" user root >/dev/null 2>&1
+docker exec "$BASTION_NAME" sh -c 'sed -i "s/^#\?PubkeyAuthentication.*/PubkeyAuthentication no/" /etc/ssh/sshd_config'
+docker exec "$BASTION_NAME" sh -c 'pkill -HUP sshd || true'
+sleep 1
+
+# Without a saved password the connection fails instead of prompting.
+OUTPUT=$($SSHGO exec "$PASSWORD_ONLY_BASTION" "echo pw_ok" 2>/dev/null || true)
+assert_not_contains "set-password: password-only bastion fails without a saved password" '"exit_code": 0' "$OUTPUT"
+
+# The prompts are answered through a pty: password, confirmation, then the
+# master password and its confirmation for the first-time store.
+printf 'rootpass\nrootpass\nmasterpw\nmasterpw\n' | \
+    script -qec "$SSHGO config set-password $PASSWORD_ONLY_BASTION" /dev/null >/dev/null 2>&1 || true
+
+# With the password saved, exec authenticates without any key.
+OUTPUT=$(printf 'masterpw\n' | script -qec "$SSHGO exec $PASSWORD_ONLY_BASTION 'echo pw_ok'" /dev/null 2>&1 || true)
+assert_contains "set-password: exec authenticates with the saved password" "pw_ok" "$OUTPUT"
+
+# Restore key auth so the rest of the suite is unaffected, and drop the store
+# created for this check.
+docker exec "$BASTION_NAME" sh -c 'sed -i "s/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/" /etc/ssh/sshd_config'
+docker exec "$BASTION_NAME" sh -c 'pkill -HUP sshd || true'
+sleep 1
+rm -f ~/.sshgo_passwords
+
 # 2i-10: `none` means a direct connection, not an error
 $SSHGO config set $TEST_HOST proxy-jump none >/dev/null 2>&1
 OUTPUT=$($SSHGO exec $TEST_HOST "echo none_ok" 2>/dev/null || true)

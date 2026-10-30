@@ -6,7 +6,6 @@ import (
 
 	"sshgo/internal/host"
 	"sshgo/internal/sshconfig"
-	"sshgo/internal/ui"
 )
 
 // runConfig dispatches the config subcommand.
@@ -37,6 +36,8 @@ func (c *CLI) runConfig(args []string) int {
 		return c.runConfigFind(cfg, args[1:])
 	case "import":
 		return c.runConfigImport()
+	case "set-password":
+		return c.runSetPassword(args[1:])
 	case "set-sudo-password":
 		return c.runSetSudoPassword(args[1:])
 	default:
@@ -137,21 +138,56 @@ func (c *CLI) runConfigFind(cfg *host.LocalConfig, args []string) int {
 	return 0
 }
 
+// runSetPassword prompts for a Host's SSH password and saves it to the encrypted
+// store. It exists because the only other way to file an SSH password is the
+// "Save password?" prompt of an interactive login — and a jump host is exactly
+// the Host that never gets one.
+func (c *CLI) runSetPassword(args []string) int {
+	if len(args) < 1 {
+		fmt.Fprintln(c.Err, "Usage: sshgo config set-password <host>")
+		return 1
+	}
+	return c.savePassword(args[0], passwordSpec{
+		label:       "SSH password",
+		usage:       "Usage: sshgo config set-password <host>",
+		savedSuffix: "saved",
+		set:         func(store passwordStore, host, pwd string) error { return store.Set(host, pwd) },
+	})
+}
+
 // runSetSudoPassword prompts for a sudo password and saves it to the encrypted store.
 func (c *CLI) runSetSudoPassword(args []string) int {
 	if len(args) < 1 {
 		fmt.Fprintln(c.Err, "Usage: sshgo config set-sudo-password <host>")
 		return 1
 	}
-	host := args[0]
+	return c.savePassword(args[0], passwordSpec{
+		label:       "sudo password",
+		usage:       "Usage: sshgo config set-sudo-password <host>",
+		savedSuffix: "saved",
+		set:         func(store passwordStore, host, pwd string) error { return store.SetSudoPassword(host, pwd) },
+	})
+}
 
-	pwd, err := ui.Password(fmt.Sprintf("Enter sudo password for %s", host))
+// passwordSpec is what the two password commands disagree on. The interaction,
+// the failure wording, and the storage path are shared so they cannot drift.
+type passwordSpec struct {
+	label       string
+	usage       string
+	savedSuffix string
+	set         func(store passwordStore, host, pwd string) error
+}
+
+// savePassword runs the shared two-entry + confirm flow and stores the result
+// under the addressed Host name, which is the first Credential Key.
+func (c *CLI) savePassword(host string, spec passwordSpec) int {
+	pwd, err := c.readPassword(fmt.Sprintf("Enter %s for %s", spec.label, host))
 	if err != nil {
 		fmt.Fprintf(c.Err, "Failed to read password: %v\n", err)
 		return 1
 	}
 
-	confirm, err := ui.Password("Confirm sudo password")
+	confirm, err := c.readPassword(fmt.Sprintf("Confirm %s", spec.label))
 	if err != nil {
 		fmt.Fprintf(c.Err, "Failed to read password: %v\n", err)
 		return 1
@@ -167,11 +203,11 @@ func (c *CLI) runSetSudoPassword(args []string) int {
 		fmt.Fprintf(c.Err, "Failed to init password store: %v\n", err)
 		return 1
 	}
-	if err := store.SetSudoPassword(host, pwd); err != nil {
-		fmt.Fprintf(c.Err, "Failed to save sudo password: %v\n", err)
+	if err := spec.set(store, host, pwd); err != nil {
+		fmt.Fprintf(c.Err, "Failed to save %s: %v\n", spec.label, err)
 		return 1
 	}
-	fmt.Fprintf(c.Out, "sudo password for %s saved\n", host)
+	fmt.Fprintf(c.Out, "%s for %s %s\n", spec.label, host, spec.savedSuffix)
 	return 0
 }
 
@@ -223,6 +259,7 @@ func (c *CLI) printConfigHelp() {
 	fmt.Fprintln(c.Out, "  unset <host> [key]            Remove metadata or entire host entry")
 	fmt.Fprintln(c.Out, "  remove <host>                 Remove an entire host entry (same as unset <host>)")
 	fmt.Fprintln(c.Out, "  import                        Import hosts from ~/.ssh/config")
+	fmt.Fprintln(c.Out, "  set-password <host>           Set SSH password for a host")
 	fmt.Fprintln(c.Out, "  set-sudo-password <host>      Set sudo password for a host")
 	fmt.Fprintln(c.Out, "  find --tag <tag>              Find hosts by tag")
 	fmt.Fprintln(c.Out)

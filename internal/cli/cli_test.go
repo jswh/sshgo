@@ -3,12 +3,16 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 	"testing"
+
+	"sshgo/internal/credential"
 )
 
 // setupTempHome points HOME (and USERPROFILE for Windows) at a fresh temp dir so
@@ -581,5 +585,97 @@ func TestExecNamesTheHopWithoutAuth(t *testing.T) {
 	// may fail to connect before authentication is even attempted.
 	if !strings.Contains(result.Stderr, "bastion") {
 		t.Errorf("exec stderr = %q, want the bastion named", result.Stderr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// config set-password
+// ---------------------------------------------------------------------------
+
+// The command is the only way to file an SSH password for a Host that is never
+// opened as an interactive shell — which is what a password-only bastion is.
+// Its interaction mirrors set-sudo-password exactly.
+func TestConfigSetPasswordMirrorsSudoPassword(t *testing.T) {
+	dir := setupTempHome(t)
+
+	// The prompts are answered from a script so the flow is assertable without a
+	// TTY: password, confirmation, then the master password and its confirmation.
+	answers := []string{"s3cret", "s3cret", "master", "master"}
+	c := &CLI{Out: io.Discard, Err: io.Discard}
+	c.password = func(string) (string, error) {
+		if len(answers) == 0 {
+			return "", fmt.Errorf("no more answers")
+		}
+		answer := answers[0]
+		answers = answers[1:]
+		return answer, nil
+	}
+	c.masterPassword = c.password
+
+	if code := c.runSetPassword([]string{"bastion"}); code != 0 {
+		t.Fatalf("runSetPassword() exit code = %d, want 0", code)
+	}
+
+	// The password is filed under the addressed name, which is what a later
+	// lookup by Credential Key reads.
+	store, err := credential.Load("master")
+	if err != nil {
+		t.Fatalf("load store: %v", err)
+	}
+	pwd, err := store.Get("bastion")
+	if err != nil {
+		t.Fatalf("Get(bastion) failed: %v", err)
+	}
+	if pwd != "s3cret" {
+		t.Errorf("saved password = %q, want %q", pwd, "s3cret")
+	}
+
+	// A password is never written to the metadata file.
+	meta, err := os.ReadFile(filepath.Join(dir, ".sshgo_config"))
+	if err == nil && bytes.Contains(meta, []byte("s3cret")) {
+		t.Error("the SSH password leaked into ~/.sshgo_config")
+	}
+}
+
+// Mismatched entries are refused with the wording set-sudo-password already uses.
+func TestConfigSetPasswordRejectsMismatch(t *testing.T) {
+	setupTempHome(t)
+
+	answers := []string{"one", "two"}
+	c := &CLI{Out: io.Discard, Err: io.Discard}
+	c.password = func(string) (string, error) {
+		answer := answers[0]
+		answers = answers[1:]
+		return answer, nil
+	}
+
+	if code := c.runSetPassword([]string{"bastion"}); code != 1 {
+		t.Errorf("runSetPassword() exit code = %d, want 1", code)
+	}
+}
+
+// Missing arguments are a usage error, not a prompt.
+func TestConfigSetPasswordUsage(t *testing.T) {
+	setupTempHome(t)
+
+	code, _, stderr := run(t, "config", "set-password")
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if want := "Usage: sshgo config set-password <host>\n"; stderr != want {
+		t.Errorf("stderr = %q, want %q", stderr, want)
+	}
+}
+
+// The command is discoverable: help is the only way most users find it.
+func TestConfigHelpListsSetPassword(t *testing.T) {
+	setupTempHome(t)
+
+	code, stdout, _ := run(t, "config", "--help")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if !strings.Contains(stdout, "set-password <host>") {
+		t.Errorf("config --help does not list set-password:\n%s", stdout)
 	}
 }

@@ -37,6 +37,10 @@ type CLI struct {
 	// without a TTY.
 	masterPassword func(label string) (string, error)
 
+	// password reads a password prompt. Nil means the terminal prompt; tests
+	// inject a fake so `config set-password` can be driven without a TTY.
+	password func(label string) (string, error)
+
 	// store caches the unlocked password store for this invocation. One call
 	// unlocks it once, no matter how many hops ask for a password, and a save
 	// reuses the same session instead of prompting again.
@@ -266,6 +270,14 @@ func terminalSize() (width, height int) {
 		height = 24
 	}
 	return width, height
+}
+
+// readPassword reads one password prompt, defaulting to the terminal prompt.
+func (c *CLI) readPassword(label string) (string, error) {
+	if c.password != nil {
+		return c.password(label)
+	}
+	return ui.Password(label)
 }
 
 // readMasterPassword reads the master password, defaulting to the terminal
