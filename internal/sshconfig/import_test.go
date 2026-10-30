@@ -1,4 +1,4 @@
-package main
+package sshconfig
 
 import (
 	"slices"
@@ -44,7 +44,7 @@ func TestImportSkipsPatterns(t *testing.T) {
 		add("!prod.example.com", map[string]string{"User": "nope"}).
 		add("prod", map[string]string{"Hostname": "10.0.0.5", "User": "deploy"})
 
-	result := buildImportSnapshot(src, nil)
+	result := BuildSnapshot(src, nil)
 
 	if _, ok := result.Hosts["*.example.com"]; ok {
 		t.Error("glob pattern *.example.com was imported as a host")
@@ -79,7 +79,7 @@ func TestImportSkipsPatterns(t *testing.T) {
 		t.Errorf("skipped = %v, want %v", skipped, want)
 	}
 
-	summary := formatSkipped(result.Skipped)
+	summary := FormatSkipped(result.Skipped)
 	if !strings.Contains(summary, "*.example.com") || !strings.Contains(summary, "wildcard") {
 		t.Errorf("summary %q does not list the skipped pattern with its reason", summary)
 	}
@@ -89,7 +89,7 @@ func TestImportRecordsSourceImported(t *testing.T) {
 	src := newFakeSSHConfig().
 		add("prod", map[string]string{"Hostname": "10.0.0.5", "User": "deploy", "Port": "2222"})
 
-	result := buildImportSnapshot(src, nil)
+	result := BuildSnapshot(src, nil)
 
 	meta, ok := result.Hosts["prod"]
 	if !ok {
@@ -110,7 +110,7 @@ func TestImportWarnsAboutProxyJump(t *testing.T) {
 		add("behind-bastion", map[string]string{"Hostname": "10.0.0.9", "ProxyJump": "bastion"}).
 		add("direct", map[string]string{"Hostname": "10.0.0.10"})
 
-	result := buildImportSnapshot(src, nil)
+	result := BuildSnapshot(src, nil)
 
 	meta, ok := result.Hosts["behind-bastion"]
 	if !ok {
@@ -146,7 +146,7 @@ func TestImportIsSnapshotNotSync(t *testing.T) {
 	src := newFakeSSHConfig().
 		add("prod", map[string]string{"Hostname": "10.0.0.6", "User": "deploy"})
 
-	result := buildImportSnapshot(src, existing)
+	result := BuildSnapshot(src, existing)
 
 	prod := result.Hosts["prod"]
 	if prod.Hostname != "10.0.0.6" || prod.User != "deploy" {
@@ -180,7 +180,7 @@ Host *
 		t.Fatalf("decode ssh config: %v", err)
 	}
 
-	result := buildImportSnapshot(sshConfigAdapter{cfg: parsed}, nil)
+	result := BuildSnapshot(NewSource(parsed), nil)
 
 	prod, ok := result.Hosts["prod"]
 	if !ok {

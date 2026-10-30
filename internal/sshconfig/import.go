@@ -1,4 +1,7 @@
-package main
+// Package sshconfig turns a parsed ~/.ssh/config into a snapshot of Host
+// metadata. Import is a snapshot, not a sync: the pure function decides what
+// gets stored, the adapter only reads the file.
+package sshconfig
 
 import (
 	"fmt"
@@ -12,25 +15,23 @@ import (
 	"sshgo/internal/host"
 )
 
-// skippedPattern records a Host pattern that import refused to store, and why.
-type skippedPattern struct {
+// SkippedPattern records a Host pattern that import refused to store, and why.
+type SkippedPattern struct {
 	Pattern string
 	Reason  string
 }
 
-// importResult is what a snapshot of a parsed SSH config yields. It is computed
-// by a pure function so the import semantics can be tested without a real
-// ~/.ssh/config.
-type importResult struct {
+// Result is what a snapshot of a parsed SSH config yields.
+type Result struct {
 	Imported int
 	Hosts    map[string]host.HostMeta
-	Skipped  []skippedPattern
+	Skipped  []SkippedPattern
 	Warnings []string
 }
 
-// sshConfigSource is the read side of an SSH config: only name lookups are
-// needed, which keeps the pure import function independent of file parsing.
-type sshConfigSource interface {
+// Source is the read side of an SSH config: only name lookups are needed, which
+// keeps the pure import function independent of file parsing.
+type Source interface {
 	// Get returns the effective value of key for name, including defaults
 	// inherited from Host * blocks.
 	Get(name, key string) (string, error)
@@ -38,13 +39,13 @@ type sshConfigSource interface {
 	Names() []string
 }
 
-// buildImportSnapshot merges the SSH config into existing local metadata.
+// BuildSnapshot merges the SSH config into existing local metadata.
 //
 // Import is a snapshot, not a sync: connection details are refreshed from the
 // config, user-owned fields (alias, notes, tags, priority) are preserved, and
 // entries deleted from ~/.ssh/config are never removed from sshgo.
-func buildImportSnapshot(src sshConfigSource, existing map[string]host.HostMeta) importResult {
-	result := importResult{Hosts: make(map[string]host.HostMeta, len(existing))}
+func BuildSnapshot(src Source, existing map[string]host.HostMeta) Result {
+	result := Result{Hosts: make(map[string]host.HostMeta, len(existing))}
 	for name, meta := range existing {
 		result.Hosts[name] = meta
 	}
@@ -57,7 +58,7 @@ func buildImportSnapshot(src sshConfigSource, existing map[string]host.HostMeta)
 		seen[name] = true
 
 		if reason := skipReason(name); reason != "" {
-			result.Skipped = append(result.Skipped, skippedPattern{Pattern: name, Reason: reason})
+			result.Skipped = append(result.Skipped, SkippedPattern{Pattern: name, Reason: reason})
 			continue
 		}
 
@@ -100,16 +101,30 @@ func skipReason(pattern string) string {
 	return ""
 }
 
-// sshConfigAdapter adapts a parsed *ssh_config.Config to sshConfigSource.
-type sshConfigAdapter struct {
+// FormatSkipped renders "pattern (reason), pattern (reason)" for one summary line.
+func FormatSkipped(skipped []SkippedPattern) string {
+	parts := make([]string, 0, len(skipped))
+	for _, s := range skipped {
+		parts = append(parts, fmt.Sprintf("%s (%s)", s.Pattern, s.Reason))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// adapter adapts a parsed *ssh_config.Config to Source.
+type adapter struct {
 	cfg *ssh_config.Config
 }
 
-func (a sshConfigAdapter) Get(name, key string) (string, error) {
+// NewSource wraps an already parsed SSH config.
+func NewSource(cfg *ssh_config.Config) Source {
+	return adapter{cfg: cfg}
+}
+
+func (a adapter) Get(name, key string) (string, error) {
 	return a.cfg.Get(name, key)
 }
 
-func (a sshConfigAdapter) Names() []string {
+func (a adapter) Names() []string {
 	var names []string
 	for _, h := range a.cfg.Hosts {
 		for _, pattern := range h.Patterns {
@@ -119,53 +134,8 @@ func (a sshConfigAdapter) Names() []string {
 	return names
 }
 
-// handleConfigImport reads ~/.ssh/config and stores the hosts it describes.
-// The work itself lives in buildImportSnapshot; this is only the I/O shell.
-func handleConfigImport() {
-	sshCfg, err := loadSSHConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to read ~/.ssh/config: %v\n", err)
-		os.Exit(1)
-	}
-
-	lc, err := host.LoadLocalConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	result := buildImportSnapshot(sshConfigAdapter{cfg: sshCfg}, lc.Hosts)
-
-	for _, warning := range result.Warnings {
-		fmt.Fprintln(os.Stderr, "Warning:", warning)
-	}
-
-	lc.Hosts = result.Hosts
-	if err := lc.Save(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("Imported %d hosts from ~/.ssh/config\n", result.Imported)
-	if len(result.Skipped) > 0 {
-		fmt.Printf("Skipped %d pattern(s): %s\n", len(result.Skipped), formatSkipped(result.Skipped))
-	}
-	fmt.Println("Run `sshgo config list` to see imported hosts.")
-	fmt.Println("Re-running `sshgo config import` refreshes connection details from ~/.ssh/config;")
-	fmt.Println("hosts deleted there are not removed here.")
-}
-
-// formatSkipped renders "pattern (reason), pattern (reason)" for one summary line.
-func formatSkipped(skipped []skippedPattern) string {
-	parts := make([]string, 0, len(skipped))
-	for _, s := range skipped {
-		parts = append(parts, fmt.Sprintf("%s (%s)", s.Pattern, s.Reason))
-	}
-	return strings.Join(parts, ", ")
-}
-
-// loadSSHConfig reads and parses ~/.ssh/config.
-func loadSSHConfig() (*ssh_config.Config, error) {
+// LoadConfig reads and parses ~/.ssh/config.
+func LoadConfig() (*ssh_config.Config, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err

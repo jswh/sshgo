@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"sshgo/internal/host"
+	"sshgo/internal/sshconfig"
 	"sshgo/internal/ui"
 )
 
@@ -168,4 +169,40 @@ func handleSetSudoPassword(args []string) {
 		os.Exit(1)
 	}
 	fmt.Printf("sudo password for %s saved\n", host)
+}
+
+// handleConfigImport reads ~/.ssh/config and stores the hosts it describes.
+// The work itself lives in sshconfig.BuildSnapshot; this is only the I/O shell.
+func handleConfigImport() {
+	sshCfg, err := sshconfig.LoadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to read ~/.ssh/config: %v\n", err)
+		os.Exit(1)
+	}
+
+	lc, err := host.LoadLocalConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	result := sshconfig.BuildSnapshot(sshconfig.NewSource(sshCfg), lc.Hosts)
+
+	for _, warning := range result.Warnings {
+		fmt.Fprintln(os.Stderr, "Warning:", warning)
+	}
+
+	lc.Hosts = result.Hosts
+	if err := lc.Save(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Imported %d hosts from ~/.ssh/config\n", result.Imported)
+	if len(result.Skipped) > 0 {
+		fmt.Printf("Skipped %d pattern(s): %s\n", len(result.Skipped), sshconfig.FormatSkipped(result.Skipped))
+	}
+	fmt.Println("Run `sshgo config list` to see imported hosts.")
+	fmt.Println("Re-running `sshgo config import` refreshes connection details from ~/.ssh/config;")
+	fmt.Println("hosts deleted there are not removed here.")
 }
