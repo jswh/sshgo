@@ -179,8 +179,6 @@ sshgo update
 
 `update` 从 GitHub 取最新 release，与当前二进制内嵌的版本比较，有新版就替换。若二进制在系统目录，回退用 `sudo mv`。
 
-<!-- 待定（owner）：跳板链在 main，最新 release 是 v0.5.0。要不要写"想要跳板链需装 main 或源码"，以及何时出新 release，发布承诺归 owner。 -->
-
 ## 现在还不做什么
 
 这些是当前的缺口，不是路线图措辞。

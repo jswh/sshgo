@@ -229,9 +229,6 @@ sshgo update
 into the running binary, and replaces the binary if there is a newer one. If the binary sits
 in a system directory it falls back to `sudo mv`.
 
-<!-- 待定（owner）：跳板链在 main，最新 release 是 v0.5.0。要不要在这里写一句「跳板链要装 main 或源码」，
-     以及是否尽快出一个新 release。发布承诺归 owner，我不写。 -->
-
 ## What sshgo does not do
 
 These are current gaps, not roadmap hedges.
