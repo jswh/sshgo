@@ -2,14 +2,11 @@
 
 # sshgo
 
-**Simple, Secure, and Efficient SSH Client**
-
-A lightweight SSH client that owns its host list: import your system SSH config once, then sshgo reads only its own metadata. Supports key authentication, encrypted password storage, structured remote execution, connection inspection, and jump hosts.
+**An SSH client that keeps its own host list and returns remote output as data.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.20+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![Release](https://img.shields.io/github/v/release/jswh/sshgo?logo=github)](https://github.com/jswh/sshgo/releases/latest)
-[![GitHub Stars](https://img.shields.io/github/stars/jswh/sshgo?style=social)](https://github.com/jswh/sshgo/stargazers)
 
 **English** | [简体中文](docs/zh-CN.md)
 
@@ -17,365 +14,266 @@ A lightweight SSH client that owns its host list: import your system SSH config 
 
 ---
 
-## ✨ Features
+sshgo is an SSH client written in Go. It talks the protocol itself through
+`golang.org/x/crypto/ssh` rather than shelling out, keeps the hosts you work with in one
+file of its own, and gives remote commands back as `stdout`, `stderr` and the remote exit
+code in JSON.
 
-| Feature | Description |
-|---------|-------------|
-| 📖 **Import SSH Config** | One-time import from `~/.ssh/config` via `config import` |
-| 🛡️ **Runtime Independence** | Never reads `~/.ssh/config` at runtime; the import is the only touch point |
-| 🔑 **SSH Key Auth** | Supports SSH Agent, configured IdentityFile, and default keys |
-| 🔒 **Encrypted Storage** | AES-GCM encryption with master password protection |
-| 🚀 **Direct Login** | Supports `user@host:port` format for direct connections |
-| 📋 **Interactive Selection** | Lists all hosts for selection when run without arguments |
-| 📦 **Exec (Structured)** | Run remote commands with structured JSON output (`exec` subcommand) |
-| 🔀 **Jump Hosts** | Reach a Host through one or more bastions (`proxy-jump`), each with its own credentials |
-| 🔍 **Info** | Inspect connection details for any host (`info` subcommand) |
-| 🏷️ **Host Metadata** | Manage aliases, notes, tags, and connection priority per host (`config` subcommand) |
-| 🔄 **Auto-Update** | Update to the latest version with a single command (`update` subcommand) |
-| 📥 **One-Click Install** | Install script downloads and places the binary in `~/.local/bin` |
+It is not a replacement for the whole `ssh` option grammar: `ssh://` URIs and
+comma-separated hop lists are rejected, and IPv6 addresses are not supported. It does not
+verify host keys yet, which is stated in the limitations section below rather than buried
+in a footnote.
 
-## 🚀 Quick Install
+## Get started
 
-### One-Click Install (Recommended)
-
-**Linux / macOS:**
 ```bash
 curl -fsSL https://github.com/jswh/sshgo/raw/main/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+
+sshgo config import          # take the hosts from ~/.ssh/config, once
+sshgo exec web-01 "uptime"   # run something, get JSON back
 ```
 
-**Windows (PowerShell):**
-```powershell
-irm https://github.com/jswh/sshgo/raw/main/install.ps1 | iex
+The output of that second command is shaped like this:
+
+```json
+{
+  "command": "uptime",
+  "stdout": " 10:12:03 up 41 days,  2:11,  1 user,  load average: 0.00, 0.01, 0.05\n",
+  "stderr": "",
+  "exit_code": 0
+}
 ```
 
-This downloads the latest release binary for your OS/arch and installs it to `~/.local/bin/`.
+The import step is optional. You can work entirely with direct addresses
+(`sshgo root@1.2.3.4:2222`) and never import anything.
 
-### Build from Source
+## The three commands you will use most
+
+### `exec`: remote commands as structured data
 
 ```bash
-git clone https://github.com/jswh/sshgo.git
-cd sshgo
-go build -o sshgo
+sshgo exec db-staging "SELECT count(*) FROM users"
+sshgo exec --raw web-01 "tail -n 100 /var/log/nginx/access.log"   # passthrough, no JSON
+sshgo exec --sudo db-staging "systemctl restart postgresql"
 ```
 
-### Using go install
+The JSON carries `command`, `stdout`, `stderr` and `exit_code`. `duration` is a
+human-readable string and appears only when `--sudo` is used or timing is enabled. `exit_code` is the remote
+command's own code, so a script can branch on it. Local failures (unknown host, no
+credentials, a hop that cannot be reached) always exit `1`, deliberately: one exit code for
+everything that went wrong before the remote command ran, so the number your script reads
+never means two different things.
+
+`exec` never stops to ask you for anything. It tries the SSH agent, the host's
+`IdentityFile`, the default key files, and a saved password, in that order. If none of them
+work it fails and names the host that had no credential, pointing at
+`sshgo config set-password <host>` as the way out. This holds for every hop of a jump
+chain. A CI job cannot answer a prompt, so sshgo does not ask it one.
+
+The sudo password is sent to the target only, as stdin of its `sudo -S`. It is never part of
+any hop's authentication.
+
+### `info`: what sshgo will do for a name
 
 ```bash
-go install github.com/jswh/sshgo@latest
+sshgo info db1
+sshgo info --json db1
 ```
 
-## 📖 Usage
-
-### Getting Started
-
-Before using sshgo for the first time, import your SSH config:
-
-```bash
-sshgo config import
+```
+Host: db1
+  Hostname: 10.0.0.5
+  Port:     22
+  User:     ops
+  Source:   imported
+  Jump:     bastion
+  Auth:
+    - SSH Agent (3 keys)
+    - Password store (encrypted)
 ```
 
-This reads `~/.ssh/config` once and stores the hosts it describes in `~/.sshgo_config`.
-From then on sshgo owns that list: it does not read `~/.ssh/config` again at runtime,
-so changing your system config does not silently change sshgo's behavior.
+`--json` returns `name`, `hostname`, `port`, `user`, `source`, `auth_methods`, and `jump`
+when the host is reached through a chain. Authentication is reported as method names and
+counts. Key paths, passwords and passphrases never appear in any output; that exclusion is
+the contract, not a formatting choice. `info` resolves the chain and reports a broken one
+without dialling, so it reaches the same verdict a connection would.
 
-The import is a snapshot, not a sync. Values are the effective ones after `Host *`
-defaults are applied, and re-running the import refreshes connection details while
-keeping your aliases, notes, tags, and priorities. Hosts you delete from
-`~/.ssh/config` are **not** removed from sshgo; use `sshgo config remove <host>`.
-Wildcard patterns (`Host *`, `Host *.example.com`) are skipped, since sshgo connects
-to concrete hosts only.
+### Plain `sshgo`: pick from the list
 
-### Login to a Host from Your List
+Running sshgo with no arguments lists your hosts and lets you choose one. With a bare name
+it looks that name up in sshgo's own list only:
 
 ```bash
 sshgo zg
 ```
 
-A bare name is looked up in sshgo's own host list only. If it is not there, sshgo
-exits with an error naming the three ways out — it never falls back to dialing the
-name as a hostname the way `ssh` would.
+If the name is not in the list, sshgo stops and names the three ways out, instead of quietly
+dialling `zg` as a hostname the way `ssh` would:
 
-### Direct Login
-
-Input containing `@` or `:` is a direct address, sshgo's own syntax, independent of
-`~/.ssh/config`. Direct addresses are always dialed as given:
-
-```bash
-sshgo root@1.2.3.4
+```
+Host "zg" not found.
+  Import your SSH config:  sshgo config import
+  Add it manually:         sshgo config set zg hostname <address>
+  Or connect directly:     sshgo user@host or sshgo host:port
 ```
 
-### Login with Port
+That message is the contract: `internal/host/resolve.go` builds it, and
+`internal/cli/cli_test.go:TestResolutionErrorText` pins the text.
+
+Anything containing `@` or `:` is a direct address, sshgo's own syntax, and is always dialled
+as given. Port defaults to `22`, user to `root`.
+
+## Where the host list comes from
+
+`sshgo config import` reads `~/.ssh/config` once and writes the hosts it describes into
+`~/.sshgo_config`. From then on sshgo reads only its own file. Editing the system config
+does not change what sshgo does; that is the point, and it is also the cost.
+
+The import is a snapshot, not a sync:
+
+- Values are the effective ones, after `Host *` defaults are folded in.
+- Wildcard and negated patterns (`Host *`, `Host *.example.com`) are skipped. sshgo connects
+  to concrete hosts.
+- Re-running the import refreshes connection details and keeps your aliases, notes, tags and
+  connection priorities.
+- A host you delete from `~/.ssh/config` is not deleted here. Use `sshgo config remove <host>`.
+
+The consequence is worth stating plainly: the two lists drift apart, and syncing them back is
+a manual act.
+
+Metadata is edited by hand too:
 
 ```bash
-sshgo root@1.2.3.4:2222
+sshgo config list                       # everything sshgo knows
+sshgo config find --tag prod            # filter by tag
+sshgo config set db1 notes "primary pg" # one of nine keys (see config --help)
+sshgo config get db1 hostname
+sshgo config unset db1 tags
+sshgo config remove db1
 ```
 
-Ports default to `22` and users to `root`. IPv6 addresses are not supported; create a
-host entry with the address instead.
+`config set` accepts `alias`, `notes`, `tags`, `connection-priority`, `hostname`, `port`,
+`user`, `identity-file` and `proxy-jump`. Any other key is rejected with that list.
 
-### Interactive Host Selection
+## Reaching a host through a jump host
+
+A jump host is an ordinary host in sshgo's list. Point the target at it:
 
 ```bash
-sshgo
+sshgo config set bastion hostname 203.0.113.9
+sshgo config set bastion user ops
+sshgo config set db1 hostname 10.0.0.5
+sshgo config set db1 proxy-jump bastion
+
+sshgo exec db1 "pg_isready"    # dialled through bastion
+sshgo info db1                 # Jump: bastion
 ```
 
-### Exec: Structured Remote Command
-
-Run a command and get structured JSON output (exit code, stdout, stderr):
+Chains nest to any depth. If `inner` is only reachable from `bastion`:
 
 ```bash
-sshgo exec db-staging "SELECT count(*) FROM users"
+sshgo config set inner proxy-jump bastion
+sshgo config set db1 proxy-jump inner
+sshgo info db1                 # Jump: bastion -> inner
 ```
 
-Raw output (passthrough):
+Credentials never cross hops. A hop uses its own user, port, `IdentityFile` and saved
+password; nothing is inherited from the target and nothing is handed back to it. The SSH
+agent is the one thing shared across a chain, because it belongs to you rather than to a
+host.
+
+The whole chain is resolved before anything is dialled. A missing hop, a hop with no
+address, or a loop fails immediately with the path spelled out, so a cycle reads as
+`db1 -> bastion -> db1` rather than as a timeout. Forward references are legal: create the
+target first and its bastion later.
+
+`proxy-jump` takes an sshgo host name, an alias, a direct address, or `none` for a direct
+connection. ssh's spellings are not accepted, because sshgo has exactly one addressing
+grammar.
+
+## Two files, one master password
+
+`~/.sshgo_config` holds host metadata as plain JSON.
+
+`~/.sshgo_passwords` holds credentials, encrypted with AES-GCM. The key is derived from your
+master password with argon2id (time 1, memory 64 MiB, threads 4, a 16-byte random salt), and
+the file is written with `0600` permissions. The master password is not stored anywhere and
+cannot be recovered; forget it and the saved credentials are gone with it.
+
+Read both halves of that. The password file is protected; the host list is not. Whoever can
+read your home directory can see which machines you connect to, under which account, on which
+ports, and which of them are reachable only through another. If that matters to you, wait for
+`known_hosts` verification and encrypted metadata to land, or keep the list somewhere you
+trust.
+
+The password store is unlocked at most once per invocation, so a chain that needs credentials
+on several hops does not ask you for the master password several times.
+
+## Install and update
 
 ```bash
-sshgo exec --raw web-01 "tail -n 100 /var/log/nginx/access.log"
+curl -fsSL https://github.com/jswh/sshgo/raw/main/install.sh | sh    # Linux / macOS
+irm https://github.com/jswh/sshgo/raw/main/install.ps1 | iex          # Windows PowerShell
+go install github.com/jswh/sshgo@latest                               # Go toolchain
 ```
 
-With sudo (reuses SSH password):
-
-```bash
-sshgo exec --sudo db-staging "systemctl restart postgresql"
-```
-
-### Info: Inspect Connection Details
-
-```bash
-sshgo info db-staging
-sshgo info --json db-staging    # Machine-readable JSON
-```
-
-### Config: Manage Hosts & Metadata
-
-Import hosts from `~/.ssh/config` (a one-time snapshot; see Getting Started):
-
-```bash
-sshgo config import
-```
-
-Set metadata for a host (stored in `~/.sshgo_config`):
-
-```bash
-sshgo config set db-staging alias db-prod
-sshgo config set db-staging tags prod,db,postgres
-sshgo config set db-staging notes "Production PostgreSQL"
-sshgo config set db-staging priority agent,key,password
-```
-
-Set or override connection details:
-
-```bash
-sshgo config set my-vm hostname 192.168.1.100
-sshgo config set my-vm user admin
-sshgo config set my-vm port 2222
-sshgo config set my-vm identity-file ~/.ssh/my_key
-sshgo config set my-vm proxy-jump bastion               # bastion is an existing Host
-```
-
-`proxy-jump` names a **Jump Host** and connections go through it. The value is resolved
-by the same rules as any other Host argument, so a Host name, an Alias, or a Direct
-Address all work; `none` or an empty value means a direct connection. Chains can be any
-depth: if `bastion` itself has a `proxy-jump`, that hop is dialled first. A chain that
-loops is refused before anything is dialled, and the cycle is printed.
-
-Remove a host entry entirely (no confirmation, safe in scripts):
-
-```bash
-sshgo config remove my-vm
-```
-
-This is the same as `sshgo config unset my-vm`. You need it because hosts deleted from
-`~/.ssh/config` are not removed from sshgo by re-importing.
-
-View all hosts and their metadata:
-
-```bash
-sshgo config list
-```
-
-Find by tag:
-
-```bash
-sshgo config find --tag prod
-```
-
-Configure a sudo password (stored encrypted in `~/.sshgo_passwords`):
-
-```bash
-sshgo config set-sudo-password db-staging
-```
-
-Configure an SSH password (same interaction, same store). Use this for a Host that only
-accepts a password — typically a bastion you reach from a script:
-
-```bash
-sshgo config set-password bastion
-```
-
-### Update: Auto-Update sshgo
-
-Check for the latest release and update the current binary:
+The install scripts place the latest release binary for your OS and architecture in
+`~/.local/bin`. Building from source is `go build -o sshgo` in a clone of this repository.
 
 ```bash
 sshgo update
 ```
 
-The update subcommand fetches the latest release from GitHub, compares the version
-tag with the embedded version (set at build time), and replaces the binary if a
-newer version is found. If the binary is in a system directory, it falls back to
-`sudo mv` automatically.
+`update` fetches the latest release from GitHub, compares its tag with the version compiled
+into the running binary, and replaces the binary if there is a newer one. If the binary sits
+in a system directory it falls back to `sudo mv`.
 
-### Jump Hosts: Reaching a Host Through a Bastion
+<!-- 待定（owner）：跳板链在 main，最新 release 是 v0.5.0。要不要在这里写一句「跳板链要装 main 或源码」，
+     以及是否尽快出一个新 release。发布承诺归 owner，我不写。 -->
 
-Give the target a `proxy-jump` pointing at an existing Host:
+## What sshgo does not do
 
-```bash
-sshgo config set bastion hostname 203.0.113.9     # the Host you pass through
-sshgo config set bastion user ops
-sshgo config set db1 hostname 10.0.0.5            # the Host behind it
-sshgo config set db1 proxy-jump bastion
+These are current gaps, not roadmap hedges.
 
-sshgo exec db1 "pg_isready"                       # connects through bastion
-sshgo info db1                                    # shows Jump: bastion
-```
+- **Host keys are not verified.** sshgo uses `InsecureIgnoreHostKey()` on every hop. A jump
+  chain does not change that: a compromised bastion can impersonate the target. `known_hosts`
+  verification is a separate feature.
+- **ssh's jump syntax is not supported.** `ssh://` URIs and comma-separated multi-hop values
+  (`bastion,inner`) are rejected. Write the chain with `proxy-jump` per host instead.
+- **A jump host must be an sshgo host or a direct address.** A name sshgo does not manage
+  cannot be a hop, because sshgo never reads `~/.ssh/config` at runtime.
+- **IPv6 is not supported**, neither in a host address nor in a jump value.
 
-Every hop is an ordinary Host with its own user, port, IdentityFile, and saved password.
-Credentials never cross hops: `db1`'s password and sudo password are never offered to
-`bastion`, and `bastion`'s password is never reused for `db1`. Only the SSH agent is
-shared, because it belongs to you rather than to a Host.
+## Commands
 
-Chains nest. If `inner` is reachable only from `bastion`:
+| Command | What it does |
+|---|---|
+| `sshgo` | List hosts and pick one |
+| `sshgo <name>` | Connect to a host from sshgo's list |
+| `sshgo user@host[:port]` | Connect to an address given on the command line |
+| `sshgo exec [--raw] [--sudo] <host> <cmd>` | Run a command, get JSON or raw streams back |
+| `sshgo info [--json] <host>` | Show resolved connection details and the jump chain |
+| `sshgo config import` | Snapshot hosts out of `~/.ssh/config`, once |
+| `sshgo config set\|get\|unset\|remove` | Edit one host's metadata |
+| `sshgo config list` / `find --tag` | See and filter the list |
+| `sshgo config set-password` / `set-sudo-password` | Store credentials for a host |
+| `sshgo update` | Replace the binary with the latest release |
 
-```bash
-sshgo config set inner proxy-jump bastion
-sshgo config set db1 proxy-jump inner
-sshgo info db1                                    # Jump: bastion -> inner
-```
+Full flags are in `sshgo <subcommand> --help`.
 
-The chain is resolved before anything is dialled, so a missing Hop, a Hop with no
-address, or a loop fails immediately with the path spelled out. `exec` never prompts for
-SSH authentication on any hop: if a hop has no key and no saved password, it fails and
-names that hop. `sshgo config set-password <hop>` is how you fix it.
+## Why it is built this way
 
-### Show Help
+Three decisions explain most of the surface:
 
-```bash
-sshgo --help
-sshgo exec --help
-sshgo info --help
-sshgo config --help
-sshgo update --help
-```
+- [ADR-0001](docs/adr/0001-separate-metadata-from-passwords.md): host metadata and
+  credentials are two files, so listing your hosts does not need a password.
+- [ADR-0002](docs/adr/0002-runtime-independence-from-system-ssh.md): sshgo never reads
+  `~/.ssh/config` at runtime; the import is the only touch point.
+- [ADR-0003](docs/adr/0003-proxyjump-as-a-chain-of-sshgo-hosts.md): a jump host is an sshgo
+  host, which is what makes chains nestable and per-hop credentials possible.
 
-## 🔐 Authentication
+[CONTEXT.md](CONTEXT.md) is the glossary those documents use: Host, Alias, Direct Address,
+Jump Host, Jump Chain, hop, Credential Key. The names in the CLI are the names in that file.
 
-The program tries authentication in this order:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Authentication Flow                      │
-├─────────────────────────────────────────────────────────────┤
-│  1. SSH Agent        → Captures key signers from agent      │
-│  2. IdentityFile     → Uses key file specified in config    │
-│  3. Default Keys     → Tries id_rsa, id_ed25519, id_ecdsa  │
-│  4. Saved Password   → Uses encrypted stored password       │
-│  5. Password Prompt  → Manual input (optional save)         │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### exec Authentication (Non-Interactive)
-
-The `exec` subcommand automatically tries Agent → IdentityFile → Default Keys → Saved Passwords, without interactive password prompts. This holds for every hop of a jump chain too. A hop with no key and no saved password fails immediately and is named, with `sshgo config set-password <hop>` as the way out.
-
-### Sudo Password
-
-`exec --sudo` uses the following priority to determine the sudo password:
-
-1. **Saved sudo password** (set via `sshgo config set-sudo-password <host>`)
-2. **Saved SSH password** (reuses the SSH login password)
-3. **Interactive prompt** (for key-authenticated connections without NOPASSWD)
-4. **NOPASSWD** (relies on target host's sudo configuration)
-
-To pre-configure a sudo password:
-
-```bash
-sshgo config set-sudo-password db-staging
-```
-
-When using key authentication and no NOPASSWD is configured, `exec --sudo` will
-prompt for a sudo password with an option to save it.
-
-Saved passwords are filed under the name you address, so use the same name for
-`set-sudo-password` and `exec`. An Alias and the Host name it points at are
-distinct keys: a password saved for `db-staging` is not used when you run
-`exec --sudo db-staging-alias`. If no entry matches the addressed name, `exec`
-falls back to the resolved Hostname so entries saved by address keep working.
-
-## ⚠️ Limitations
-
-- **Host keys are not verified.** sshgo uses `InsecureIgnoreHostKey()` on every hop. A
-  Jump Chain therefore does **not** make sshgo safer: a compromised bastion can
-  impersonate the target. `known_hosts` verification is a separate feature.
-- **ssh's jump syntax is not supported.** `ssh://` URIs and comma-separated multi-hop
-  values (`bastion,inner`) are rejected. Write the chain with `proxy-jump` per Host
-  instead.
-- **A Jump Host must be an sshgo Host or a Direct Address.** A name that sshgo does not
-  manage cannot be a hop, because sshgo never reads `~/.ssh/config` at runtime.
-- **IPv6 is not supported**, in a Host address or a jump value.
-
-## 🗂️ Project Structure
-
-```
-sshgo/
-├── main.go              # os.Exit(cli.Run(...)) plus the version injected by -ldflags
-├── internal/cli/        # subcommand dispatch, help text, exit codes, auth strategies
-├── internal/host/       # Host metadata, CRUD, provenance, resolution
-├── internal/credential/ # encrypted password store (AES-GCM + argon2id)
-├── internal/sshconfig/  # config import: pure snapshot builder + ssh config adapter
-├── internal/connect/    # the only dial point: Dial / Chain / sessions
-├── internal/update/     # self-update, version passed in by the caller
-├── internal/ui/         # terminal input: selection, prompts, terminal predicates
-├── install.sh           # One-click install script (Unix)
-├── install.ps1          # One-click install script (Windows)
-├── test/                # e2e: Dockerfile (sshd + sudoers) + setup.sh
-├── CONTEXT.md           # Domain glossary
-├── docs/
-│   ├── adr/
-│   │   ├── 0001-separate-metadata-from-passwords.md
-│   │   ├── 0002-runtime-independence-from-system-ssh.md
-│   │   └── 0003-proxyjump-as-a-chain-of-sshgo-hosts.md
-│   └── zh-CN.md         # Simplified Chinese documentation
-├── go.mod               # Go module definition
-├── go.sum               # Dependency checksums
-├── LICENSE              # MIT License
-└── README.md            # Documentation
-```
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🔗 Links
-
-- [GitHub Repository](https://github.com/jswh/sshgo)
-- [Issue Tracker](https://github.com/jswh/sshgo/issues)
-- [Go Documentation](https://go.dev/doc/)
-
----
-
-<div align="center">
-
-**If you find this project helpful, please give it a ⭐ Star!**
-
-</div>
+Contributions are welcome. [LICENSE](LICENSE) is MIT.
