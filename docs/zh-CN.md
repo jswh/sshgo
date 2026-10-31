@@ -2,371 +2,219 @@
 
 # sshgo
 
-**简单、安全、高效的 SSH 客户端**
-
-一个简洁的 SSH 客户端：导入一次系统 SSH 配置，之后 sshgo 拥有自己的主机清单，运行时只读自己的元数据。支持密钥认证、密码加密存储、结构化远程执行、连接详情查看与跳板机。
+**一份自有的主机清单，远程命令返回结构化数据。**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.20+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![Release](https://img.shields.io/github/v/release/jswh/sshgo?logo=github)](https://github.com/jswh/sshgo/releases/latest)
-[![GitHub Stars](https://img.shields.io/github/stars/jswh/sshgo?style=social)](https://github.com/jswh/sshgo/stargazers)
 
-[English](../README.md) | **简体中文**
+**[English](README.md)** | 简体中文
 
 </div>
 
 ---
 
-## ✨ 功能特性
+sshgo 是一个用 Go 写的 SSH 客户端。它通过 `golang.org/x/crypto/ssh` 直接说 SSH 协议而不调系统 ssh，把你常用的主机放进自己的一个清单文件，远程命令以 JSON 返回 `stdout`、`stderr` 与远端退出码。
 
-| 功能 | 描述 |
-|------|------|
-| 📖 **导入 SSH 配置** | 通过 `config import` 一次性导入 `~/.ssh/config` 的主机 |
-| 🛡️ **运行时独立** | 运行时永不读取 `~/.ssh/config`，导入是唯一的接触点 |
-| 🔑 **SSH Key 认证** | 支持 SSH Agent、配置的 IdentityFile 和默认密钥 |
-| 🔒 **密码加密存储** | 使用 AES-GCM 加密保存密码，主密码保护 |
-| 🚀 **直接登录** | 支持 `user@host:port` 格式直接连接 |
-| 📋 **交互式选择** | 无参数时列出所有主机供选择 |
-| 📦 **Exec（结构化执行）** | 远程命令执行，返回结构化 JSON 输出 |
-| 🔀 **跳板机** | 经一台或多台堡垒机到达主机（`proxy-jump`），每跳各自持有凭据 |
-| 🔍 **Info** | 查看主机的连接详情 |
-| 🏷️ **主机元数据** | 管理别名、备注、标签、连接优先级 |
-| 🔄 **自动更新** | 一条命令更新到最新版本（`update` 子命令） |
-| 📥 **一键安装** | 安装脚本自动下载二进制到 `~/.local/bin` |
+它不是 `ssh` 全部语法的替代品：`ssh://` URI 与逗号分隔的多跳写法会被拒绝，IPv6 地址暂不支持。主机密钥校验也尚未实现——这一点写在下面的"现在还不做什么"，而不是藏在脚注里。
 
-## 🚀 快速安装
+## 快速上手
 
-### 一键安装（推荐）
-
-**Linux / macOS**
 ```bash
 curl -fsSL https://github.com/jswh/sshgo/raw/main/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+
+sshgo config import          # 从 ~/.ssh/config 导入一次
+sshgo exec web-01 "uptime"   # 跑一条命令，拿回 JSON
 ```
 
-**Windows (PowerShell)**
-```powershell
-irm https://github.com/jswh/sshgo/raw/main/install.ps1 | iex
+第二条命令的输出长这样：
+
+```json
+{
+  "command": "uptime",
+  "stdout": " 10:12:03 up 41 days,  2:11,  1 user,  load average: 0.00, 0.01, 0.05\n",
+  "stderr": "",
+  "exit_code": 0
+}
 ```
 
-自动下载最新 release 二进制到 `~/.local/bin/`。
+导入是可选的。你完全可以只用直接地址（`sshgo root@1.2.3.4:2222`），什么都不导入。
 
-### 从源码编译
+## 最常用的三条命令
+
+### `exec`：远程命令返回结构化数据
 
 ```bash
-git clone https://github.com/jswh/sshgo.git
-cd sshgo
-go build -o sshgo
+sshgo exec db-staging "SELECT count(*) FROM users"
+sshgo exec --raw web-01 "tail -n 100 /var/log/nginx/access.log"   # 原样透传，不出 JSON
+sshgo exec --sudo db-staging "systemctl restart postgresql"
 ```
 
-### 使用 go install
+JSON 携带 `command`、`stdout`、`stderr` 和 `exit_code`。`duration` 是人类可读字符串，只在 `--sudo` 或开启计时时出现。`exit_code` 是远端命令自己的退出码，脚本可以直接分支。本地失败（未知名、缺凭据、某跳不可达）一律退出码 `1`——远端命令跑起来之前出的一切错共用一个码，你的脚本读到的数字不会有两个含义。
+
+`exec` 全程不向你提问。它依次尝试 SSH agent、主机的 `IdentityFile`、默认密钥文件和已存口令；都不行就失败，点名缺凭据的那台主机，并指向 `sshgo config set-password <host>`。这条规则对跳板链的每一跳都成立。CI 任务回答不了提示，所以 sshgo 不问它。
+
+sudo 口令只发给目标机，作为其 `sudo -S` 的 stdin，绝不参与任何一跳的认证。
+
+### `info`：sshgo 对这个名字会做什么
 
 ```bash
-go install github.com/jswh/sshgo@latest
+sshgo info db1
+sshgo info --json db1
 ```
 
-## 📖 使用方法
-
-### 首次使用
-
-首次使用前，先导入 SSH 配置：
-
-```bash
-sshgo config import
+```
+Host: db1
+  Hostname: 10.0.0.5
+  Port:     22
+  User:     ops
+  Source:   imported
+  Jump:     bastion
+  Auth:
+    - SSH Agent (3 keys)
+    - Password store (encrypted)
 ```
 
-这会一次性读取 `~/.ssh/config`，把它描述的主机存入 `~/.sshgo_config`。
-从此这份清单归 sshgo 所有：运行时不再读 `~/.ssh/config`，所以你改系统配置
-不会悄悄改变 sshgo 的行为。
+`--json` 返回 `name`、`hostname`、`port`、`user`、`source`、`auth_methods`，经跳板访问时还有 `jump`。认证以方法名和数量呈现；密钥路径、口令和 passphrase 绝不出现在任何输出里——这是契约，不是排版选择。`info` 会解析跳板链并在不拨号的情况下报告断链，与真实连接得出同样的结论。
 
-导入是**快照**，不是同步。存下的是应用 `Host *` 默认值之后的**有效值**；
-重复导入会刷新连接详情，同时保留你的 alias、notes、tags、priority。
-在 `~/.ssh/config` 里删掉的主机**不会**从 sshgo 中消失，请用
-`sshgo config remove <host>` 手动删除。
-通配符 pattern（`Host *`、`Host *.example.com`）会被跳过，因为 sshgo 只连具体主机。
+### 直接 `sshgo`：从清单里选
 
-### 登录清单中的主机
+不带参数运行 sshgo 会列出主机供你选择。裸名只在 sshgo 自己的清单里查：
 
 ```bash
 sshgo zg
 ```
 
-裸名只在 sshgo 自己的主机清单里查找。查不到就报错退出，并给出三条出路，
-**不会**像 `ssh` 那样把名字当主机名去连。
+名字不在清单里时，sshgo 会停下并给出三条出路，而不是像 `ssh` 那样悄悄把 `zg` 当主机名去拨号：
 
-### 直接登录指定地址
-
-含 `@` 或 `:` 的输入是直连地址，属于 sshgo 自己的语法，与 `~/.ssh/config`
-无关。直连地址永远按原样连接：
-
-```bash
-sshgo root@1.2.3.4
+```
+Host "zg" not found.
+  Import your SSH config:  sshgo config import
+  Add it manually:         sshgo config set zg hostname <address>
+  Or connect directly:     sshgo user@host or sshgo host:port
 ```
 
-### 带端口登录
+这条消息就是契约：由 `internal/host/resolve.go` 生成，`internal/cli/cli_test.go:TestResolutionErrorText` 钉住全文。
+
+凡含 `@` 或 `:` 的输入都是直接地址——sshgo 自己的语法，按原样拨号。端口默认 `22`，用户默认 `root`。
+
+## 主机清单从哪来、之后归谁
+
+`sshgo config import` 读取 `~/.ssh/config` 一次，把它描述的主机写进 `~/.sshgo_config`。从此 sshgo 只读自己的文件。改系统配置不影响 sshgo 的行为——这是设计要点，也是代价。
+
+导入是快照，不是同步：
+
+- 导入的是生效值（`Host *` 默认值合并后）。
+- 通配与取反 pattern（`Host *`、`Host *.example.com`）被跳过，sshgo 只连具体主机。
+- 重复导入刷新连接细节，保留别名、备注、标签与连接优先级。
+- 你在 `~/.ssh/config` 里删掉的主机不会在这里消失，要用 `sshgo config remove <host>`。
+
+值得直说：两份清单会各自漂移，把它们合回来是手动动作。
+
+元数据也可以手工编辑：
 
 ```bash
-sshgo root@1.2.3.4:2222
+sshgo config list                       # sshgo 知道的一切
+sshgo config find --tag prod            # 按标签过滤
+sshgo config set db1 notes "primary pg" # 九个键之一
+sshgo config get db1 hostname
+sshgo config unset db1 tags
+sshgo config remove db1
 ```
 
-端口缺省 `22`，用户缺省 `root`。不支持 IPv6 地址；请改为建一条 Host 条目。
+`config set` 接受 `alias`、`notes`、`tags`、`connection-priority`、`hostname`、`port`、`user`、`identity-file`、`proxy-jump`，其他键一律拒绝并列出这份清单。
 
-### 交互式选择主机
+## 经跳板抵达目标机
+
+跳板主机就是 sshgo 清单里的一台普通主机。把目标指向它：
 
 ```bash
-sshgo
+sshgo config set bastion hostname 203.0.113.9
+sshgo config set bastion user ops
+sshgo config set db1 hostname 10.0.0.5
+sshgo config set db1 proxy-jump bastion
+
+sshgo exec db1 "pg_isready"    # 经 bastion 拨号
+sshgo info db1                 # Jump: bastion
 ```
 
-### Exec: 远程命令执行（结构化输出）
-
-执行命令并返回结构化 JSON（含 stdout、stderr、exit_code）：
+链可以嵌套任意深度。若 `inner` 只有 `bastion` 能到：
 
 ```bash
-sshgo exec db-staging "SELECT count(*) FROM users"
+sshgo config set inner proxy-jump bastion
+sshgo config set db1 proxy-jump inner
+sshgo info db1                 # Jump: bastion -> inner
 ```
 
-原始输出透传：
+凭据不跨跳。每一跳用它自己的用户、端口、`IdentityFile` 和已存口令；不从目标继承任何东西，也不向目标回传任何东西。SSH agent 是链上唯一共享物，因为它属于你而不是某台主机。
+
+整条链在任何拨号发生前解析。缺一跳、某跳没有地址、成环，都会立即失败并写出路径——环会显示为 `db1 -> bastion -> db1`，而不是超时。前向引用合法：先建目标、后补跳板。
+
+`proxy-jump` 接受 sshgo 主机名、别名、直接地址，或表示直连的 `none`。ssh 的写法不被接受，因为 sshgo 只有一套寻址语法。
+
+## 两个文件，一个主口令
+
+`~/.sshgo_config` 以明文 JSON 存主机元数据。
+
+`~/.sshgo_passwords` 存凭据，AES-GCM 加密。密钥由你的主口令经 argon2id 派生（time 1、内存 64 MiB、threads 4、16 字节随机盐），文件权限 `0600`。主口令不存任何地方、无法恢复；忘了它，已存凭据随之消失。
+
+这两半都要读：口令文件是受保护的，主机清单不是。能读你家目录的人能看到你连哪些机器、用什么账号、哪些端口、哪些只能经跳板抵达。如果这对你重要，等 `known_hosts` 校验与元数据加密落地，或把清单放在你信任的地方。
+
+口令库每次运行最多解锁一次，一条链上多跳需要凭据也不会反复要主口令。
+
+## 安装与更新
 
 ```bash
-sshgo exec --raw web-01 "tail -n 100 /var/log/nginx/access.log"
+curl -fsSL https://github.com/jswh/sshgo/raw/main/install.sh | sh    # Linux / macOS
+irm https://github.com/jswh/sshgo/raw/main/install.ps1 | iex          # Windows PowerShell
+go install github.com/jswh/sshgo@latest                               # Go 工具链
 ```
 
-使用 sudo 提权：
-
-```bash
-sshgo exec --sudo db-staging "systemctl restart postgresql"
-```
-
-### Info: 查看连接详情
-
-```bash
-sshgo info db-staging
-sshgo info --json db-staging    # 机器可读 JSON 格式
-```
-
-### Config: 管理主机与元数据
-
-从 `~/.ssh/config` 导入主机（一次性快照，详见「首次使用」）：
-
-```bash
-sshgo config import
-```
-
-设置主机元数据（存储在 `~/.sshgo_config`）：
-
-```bash
-sshgo config set db-staging alias db-prod
-sshgo config set db-staging tags prod,db,postgres
-sshgo config set db-staging notes "生产 PostgreSQL 实例"
-sshgo config set db-staging priority agent,key,password
-```
-
-设置或覆盖连接详情：
-
-```bash
-sshgo config set my-vm hostname 192.168.1.100
-sshgo config set my-vm user admin
-sshgo config set my-vm port 2222
-sshgo config set my-vm identity-file ~/.ssh/my_key
-sshgo config set my-vm proxy-jump bastion               # bastion 是已存在的 Host
-```
-
-`proxy-jump` 指定一台**跳板机（Jump Host）**，连接会真的经过它。取值按与其他
-Host 参数完全相同的规则解析，所以 Host 名、Alias、直连地址都可以；`none` 或空值
-表示直连。链可以任意深度：如果 `bastion` 自己也有 `proxy-jump`，那一跳会先被拨通。
-成环的链在拨号之前就会被拒绝，并打印出环的路径。
-
-删除整条主机条目（无确认交互，可在脚本中使用）：
-
-```bash
-sshgo config remove my-vm
-```
-
-等同于 `sshgo config unset my-vm`。之所以需要它：在 `~/.ssh/config` 里删掉的
-主机不会因为重新导入而从 sshgo 中消失。
-
-查看所有主机及其元数据：
-
-```bash
-sshgo config list
-```
-
-按标签搜索：
-
-```bash
-sshgo config find --tag prod
-```
-
-配置 sudo 密码（加密存储在 `~/.sshgo_passwords`）：
-
-```bash
-sshgo config set-sudo-password db-staging
-```
-
-配置 SSH 密码（同样的交互，同样的存储）。用于只认口令的主机——通常是脚本里要
-经过的堡垒机：
-
-```bash
-sshgo config set-password bastion
-```
-
-### 自动更新
-
-检查最新 release 并更新当前二进制：
+安装脚本把最新 release 的二进制放进 `~/.local/bin`。源码构建就是在克隆的仓库里 `go build -o sshgo`。
 
 ```bash
 sshgo update
 ```
 
-update 子命令从 GitHub 获取最新版本，与构建时嵌入的版本号比较，
-发现新版本后自动下载并替换二进制。如果二进制在系统目录中，
-会自动 fallback 到 `sudo mv`。
+`update` 从 GitHub 取最新 release，与当前二进制内嵌的版本比较，有新版就替换。若二进制在系统目录，回退用 `sudo mv`。
 
-### 跳板机：经堡垒机到达内网主机
+<!-- 待定（owner）：跳板链在 main，最新 release 是 v0.5.0。要不要写"想要跳板链需装 main 或源码"，以及何时出新 release，发布承诺归 owner。 -->
 
-给目标机设一个指向已存在 Host 的 `proxy-jump`：
+## 现在还不做什么
 
-```bash
-sshgo config set bastion hostname 203.0.113.9     # 你要经过的那台
-sshgo config set bastion user ops
-sshgo config set db1 hostname 10.0.0.5            # 它背后的目标
-sshgo config set db1 proxy-jump bastion
+这些是当前的缺口，不是路线图措辞。
 
-sshgo exec db1 "pg_isready"                       # 经 bastion 连接
-sshgo info db1                                    # 显示 Jump: bastion
-```
+- **主机密钥不校验。** 每一跳都用 `InsecureIgnoreHostKey()`。跳板链不改变这一点：被攻陷的堡垒机可以冒充目标。`known_hosts` 校验是独立特性。
+- **ssh 的跳板语法不支持。** `ssh://` URI 与逗号分隔的多跳值（`bastion,inner`）会被拒绝。请用每主机 `proxy-jump` 写链。
+- **跳板必须是 sshgo 管理的主机或直接地址。** sshgo 不管理的名字不能当跳板，因为 sshgo 运行时绝不读 `~/.ssh/config`。
+- **不支持 IPv6**，主机地址和跳板值都不支持。
 
-每一跳都是一台普通 Host，有自己的用户、端口、IdentityFile 与存库口令。凭据**不跨跳
-共享**：`db1` 的口令与 sudo 口令绝不会发给 `bastion`，`bastion` 的口令也不会被复用到
-`db1`。唯一共享的是 SSH agent，因为它属于你，而不属于某台主机。
+## 命令一览
 
-链可以嵌套。如果 `inner` 只能从 `bastion` 到达：
+| 命令 | 作用 |
+|---|---|
+| `sshgo` | 列出主机并选择 |
+| `sshgo <name>` | 连接清单里的主机 |
+| `sshgo user@host[:port]` | 连接命令行给的地址 |
+| `sshgo exec [--raw] [--sudo] <host> <cmd>` | 执行命令，返回 JSON 或原始流 |
+| `sshgo info [--json] <host>` | 显示解析后的连接细节与跳板链 |
+| `sshgo config import` | 从 `~/.ssh/config` 快照一次 |
+| `sshgo config set\|get\|unset\|remove` | 编辑一台主机的元数据 |
+| `sshgo config list` / `find --tag` | 查看与过滤清单 |
+| `sshgo config set-password` / `set-sudo-password` | 存一台主机的凭据 |
+| `sshgo update` | 用最新 release 替换二进制 |
 
-```bash
-sshgo config set inner proxy-jump bastion
-sshgo config set db1 proxy-jump inner
-sshgo info db1                                    # Jump: bastion -> inner
-```
+完整参数见 `sshgo <subcommand> --help`。
 
-链在拨号之前就解析完毕，所以跳板不存在、跳板没有地址、或链成环都会立刻失败，
-并打印出路径。`exec` 在任何一跳都不会提示输入 SSH 口令：某一跳既无 key 又无存库
-口令时立刻失败并点名那一跳，出路是 `sshgo config set-password <跳板>`。
+## 为什么这样设计
 
-### 查看帮助
+三个决定解释了大部分表面：
 
-```bash
-sshgo --help
-sshgo exec --help
-sshgo info --help
-sshgo config --help
-sshgo update --help
-```
+- [ADR-0001](docs/adr/0001-separate-metadata-from-passwords.md)：主机元数据与凭据分两个文件，列主机不需要口令。
+- [ADR-0002](docs/adr/0002-runtime-independence-from-system-ssh.md)：sshgo 运行时绝不读 `~/.ssh/config`；导入是唯一触点。
+- [ADR-0003](docs/adr/0003-proxyjump-as-a-chain-of-sshgo-hosts.md)：跳板是 sshgo 主机，链因此可嵌套、凭据因此可按跳隔离。
 
-## 🔐 认证方式
+[CONTEXT.md](CONTEXT.md) 是这些文档用的术语表：Host、Alias、Direct Address、Jump Host、Jump Chain、hop、Credential Key。CLI 里的名字就是这份文件里的名字。
 
-程序按以下顺序尝试认证：
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      认证流程                               │
-├─────────────────────────────────────────────────────────────┤
-│  1. SSH Agent        → 从 SSH 代理获取密钥签名              │
-│  2. IdentityFile     → 使用 SSH 配置中指定的密钥文件        │
-│  3. 默认密钥         → 尝试 id_rsa, id_ed25519, id_ecdsa   │
-│  4. 已保存密码       → 使用加密存储的密码                   │
-│  5. 密码提示         → 手动输入密码（可选保存）              │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### exec 认证（非交互式）
-
-exec 子命令自动尝试 Agent → IdentityFile → 默认密钥 → 已保存密码，不会交互式提示输入密码。
-跳板链上的每一跳同样如此：某一跳既无 key 又无存库口令时立刻失败并点名那一跳，
-出路是 `sshgo config set-password <跳板>`。
-
-### sudo 密码
-
-`exec --sudo` 按以下优先级确定 sudo 密码：
-
-1. **已保存的 sudo 密码**（通过 `sshgo config set-sudo-password <host>` 设置）
-2. **已保存的 SSH 密码**（复用 SSH 登录密码）
-3. **交互式提示**（密钥登录且没有 NOPASSWD 时）
-4. **NOPASSWD**（依赖远程主机的 sudo 配置）
-
-预先配置 sudo 密码：
-
-```bash
-sshgo config set-sudo-password db-staging
-```
-
-使用密钥登录且远程没有 NOPASSWD 时，`exec --sudo` 会提示输入 sudo 密码并可选保存。
-
-已保存的口令按**你寻址的名字**存放，因此 `set-sudo-password` 与 `exec` 要用同一个名字。
-Alias 与它指向的 Host 名是两个不同的键：为 `db-staging` 存的口令，在运行
-`exec --sudo db-staging-alias` 时不会命中。如果寻址的名字没有对应条目，`exec`
-会回落到解析后的 Hostname，以兼容按地址存的旧条目。
-
-## ⚠️ 已知限制
-
-- **不校验主机密钥。** sshgo 在每一跳都用 `InsecureIgnoreHostKey()`。因此跳板链**不会**
-  让 sshgo 更安全：被攻陷的堡垒机可以冒充目标机。`known_hosts` 校验是另一个独立特性。
-- **不支持 ssh 的跳板语法。** `ssh://` URI 与逗号多跳写法（`bastion,inner`）会被拒绝。
-  请改为逐台 Host 设置 `proxy-jump`。
-- **跳板必须是 sshgo 管理的 Host 或直连地址。** sshgo 不认识的裸名不能当跳板，因为
-  运行时它从不读 `~/.ssh/config`。
-- **不支持 IPv6**，无论是主机地址还是跳板取值。
-
-## 🗂️ 项目结构
-
-```
-sshgo/
-├── main.go              # os.Exit(cli.Run(...)) 与 -ldflags 注入的版本号
-├── internal/cli/        # 子命令分发、帮助文案、退出码、两套认证策略
-├── internal/host/       # Host 元数据、CRUD、出处、解析
-├── internal/credential/ # 加密口令库（AES-GCM + argon2id）
-├── internal/sshconfig/  # config import：纯函数快照构建 + ssh 配置适配器
-├── internal/connect/    # 唯一拨号点：Dial / Chain / 会话
-├── internal/update/     # 自更新，版本号由调用方传入
-├── internal/ui/         # 终端输入：选择、提示、终端判定
-├── install.sh           # 一键安装脚本 (Unix)
-├── install.ps1          # 一键安装脚本 (Windows)
-├── test/                # e2e：Dockerfile（sshd + sudoers）+ setup.sh
-├── CONTEXT.md           # 领域术语表
-├── docs/
-│   ├── adr/
-│   │   ├── 0001-separate-metadata-from-passwords.md
-│   │   ├── 0002-runtime-independence-from-system-ssh.md
-│   │   └── 0003-proxyjump-as-a-chain-of-sshgo-hosts.md
-│   └── zh-CN.md         # 简体中文文档
-├── go.mod               # Go 模块定义
-├── go.sum               # 依赖校验
-├── LICENSE              # MIT 许可证
-└── README.md            # 项目文档
-```
-
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
-1. Fork 本仓库
-2. 创建特性分支 (`git checkout -b feature/amazing-feature`)
-3. 提交更改 (`git commit -m 'Add amazing feature'`)
-4. 推送到分支 (`git push origin feature/amazing-feature`)
-5. 创建 Pull Request
-
-## 📄 许可证
-
-本项目采用 MIT 许可证 - 查看 [LICENSE](LICENSE) 文件了解详情。
-
-## 🔗 相关链接
-
-- [GitHub 仓库](https://github.com/jswh/sshgo)
-- [问题反馈](https://github.com/jswh/sshgo/issues)
-- [Go 官方文档](https://go.dev/doc/)
-
----
-
-<div align="center">
-
-**如果这个项目对你有帮助，请给个 ⭐ Star 支持一下！**
-
-</div>
+欢迎贡献。[LICENSE](LICENSE) 为 MIT。
